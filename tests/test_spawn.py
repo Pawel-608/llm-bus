@@ -194,7 +194,7 @@ def test_real_screen_roundtrip(tmp_path, monkeypatch, capsys):
             time.sleep(0.1)
         assert marker.read_text().strip() == "bob"
         _, rows = run(capsys, "ps")
-        assert rows[0]["alive"] is True
+        assert {r["name"]: r["alive"] for r in rows}["bob"] is True
     finally:
         _, r = run(capsys, "kill", "bob")
     assert r["killed"] is True
