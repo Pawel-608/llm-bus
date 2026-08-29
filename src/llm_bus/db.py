@@ -85,12 +85,24 @@ class Bus:
             raise BusError(f"project '{name}' not found")
         return dict(row)
 
+    def ensure_project(self, name: str) -> dict:
+        self.conn.execute("INSERT OR IGNORE INTO projects(name) VALUES (?)", (name,))
+        return self.get_project(name)
+
+    def ensure_group(self, project: str, name: str) -> dict:
+        p = self.ensure_project(project)
+        self.conn.execute(
+            "INSERT OR IGNORE INTO groups(project_id, name) VALUES (?,?)",
+            (p["id"], name),
+        )
+        return self.get_group(project, name)
+
     def list_projects(self) -> list[dict]:
         rows = self.conn.execute(
             """SELECT p.id, p.name, p.created_at,
                       (SELECT COUNT(*) FROM groups g WHERE g.project_id=p.id) AS groups,
                       (SELECT COUNT(*) FROM project_members m WHERE m.project_id=p.id) AS members
-               FROM projects p ORDER BY p.name"""
+               FROM projects p WHERE p.name NOT LIKE '\\_%' ESCAPE '\\' ORDER BY p.name"""
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -211,6 +223,14 @@ class Bus:
             "SELECT COALESCE(MAX(id),0) AS m FROM messages WHERE group_id=?", (g["id"],)
         ).fetchone()
         return int(row["m"])
+
+    def count_after(self, project: str, group: str, after: int) -> int:
+        g = self.get_group(project, group)
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE group_id=? AND id>?",
+            (g["id"], after),
+        ).fetchone()
+        return int(row["n"])
 
     def search(
         self, project: str, group: str, query: str, limit: int = 50

@@ -28,7 +28,7 @@ llm-bus -c alice -p ./.llm_bus_project send "hello"
 ### Agent folder  `~/.llm_bus/agents/<name>/`
 
 ```
-config.toml   name = "alice"  role = "backend dev"
+config.toml   name = "alice"  role = "backend dev"   [+ optional [spawn] table, see below]
 CONTEXT.md    free-form instructions / knowledge for this agent (you or the agent edit it)
 NOTES.md      the agent's memory; append with `llm-bus -c alice remember "..."`
 state.json    CLI-managed read cursors per project/group
@@ -61,6 +61,35 @@ Point a fresh LLM session at its folder and project file, e.g.:
 `whoami` prints identity, role, CONTEXT.md, NOTES.md, memberships and unread counts.
 Bare `llm-bus` / `llm-bus guide` prints a full agent-oriented reference (JSON shapes, exit codes, loop).
 
+### On demand (screen sessions)
+
+Or let the bus start agents when they're needed. An agent declares how to run itself; liveness is
+simply "does a screen session with that name exist", and whoever DMs a dead agent starts it:
+
+```toml
+# ~/.llm_bus/agents/bob/config.toml
+name = "bob"
+role = "qa"
+
+[spawn]
+cmd = "claude --dangerously-skip-permissions 'You are {name}. Run `llm-bus -c {name} whoami` and act on unread.'"
+session = "bob"        # screen session name (default: agent name)
+cwd = "/path/to/repo"  # default: the agent folder
+```
+
+```sh
+llm-bus init bob --role qa --cmd "claude ... {name} ..." --cwd ~/repo   # same thing at creation
+llm-bus ps                               # who is running (* = session alive)
+llm-bus spawn bob | llm-bus kill bob     # start (no-op if alive) / quit the session
+screen -r bob                            # watch or take over
+llm-bus -c alice dm bob "hi"             # auto-starts bob if dead (--no-spawn to skip)
+llm-bus -c alice ask "who does X?"       # auto-starts the hub the same way
+```
+
+Any number of agents run concurrently, one screen session each. Spawned agents should exit when
+idle (`wait -t N` → exit 2 → wrap up) so they come back fresh next time. For several copies of one
+role, create separate agents (`bob-1`, `bob-2`): cursors and notes are per agent folder.
+
 ## Commands
 
 ```sh
@@ -80,6 +109,10 @@ llm-bus $A read --unread                            # only what alice hasn't see
 llm-bus $A wait [-t 300]                            # block until others post; exit 2 on timeout
 llm-bus -p demo search [GROUP] "ticket"
 llm-bus -c alice remember "bob owns the DB layer"
+
+llm-bus -c alice dm bob "can you review #12?" | dm bob | dm --wait -t 60 | dm    # DMs, no -p needed
+llm-bus hub init | directory ["query"] | -c alice ask "who can help with X?"   # the hub agent
+llm-bus ps | spawn NAME | kill NAME                                             # on-demand agents
 ```
 
 Add `--json` before the subcommand for machine-readable output. Exit codes: 0 ok, 1 error, 2 wait timeout.

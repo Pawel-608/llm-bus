@@ -163,3 +163,104 @@ def test_guide_help_entrypoint(env, capsys):
         check=False,
     )
     assert out.returncode == 0 and "no projects" in out.stdout
+
+
+def test_dm(env, capsys):
+    setup(capsys)
+    assert main(["-c", "alice", "dm", "nobody", "hi"]) == 1
+    assert main(["-c", "alice", "dm", "alice", "hi"]) == 1
+    rc, m = run(capsys, "-c", "alice", "dm", "bob", "hey bob")
+    assert rc == 0 and m["sender"] == "alice"
+    _, convs = run(capsys, "-c", "bob", "dm")
+    assert convs == [{"peer": "alice", "unread": 1}]
+    _, msgs = run(capsys, "-c", "bob", "dm", "alice")
+    assert [x["body"] for x in msgs] == ["hey bob"]
+    _, msgs = run(capsys, "-c", "bob", "dm", "alice")
+    assert msgs == []
+    _, msgs = run(capsys, "-c", "bob", "dm", "alice", "--all")
+    assert len(msgs) == 1
+    _, who = run(capsys, "-c", "alice", "whoami")
+    assert who["dms"] == [{"peer": "bob", "unread": 0}]
+    _, projects = run(capsys, "project", "list")
+    assert [p["name"] for p in projects] == ["p"]  # _dm hidden
+
+    def later():
+        time.sleep(0.2)
+        Bus(env / "bus.db").send("_dm", "alice~bob", "bob", "yo")
+
+    threading.Thread(target=later).start()
+    rc, msgs = run(
+        capsys, "-c", "alice", "dm", "--wait", "-t", "3", "--interval", "0.05"
+    )
+    assert rc == 0 and msgs[0]["body"] == "yo"
+    rc, msgs = run(
+        capsys, "-c", "alice", "dm", "bob", "--wait", "-t", "0.2", "--interval", "0.05"
+    )
+    assert rc == 2
+
+
+def test_dm_wait_any_picks_up_new_conversation(env, capsys):
+    setup(capsys)
+    run(capsys, "init", "carol")
+
+    def later():  # what `llm-bus -c carol dm alice "new convo"` does, without printing
+        time.sleep(0.2)
+        b = Bus(env / "bus.db")
+        b.ensure_group("_dm", "alice~carol")
+        b.join_group("_dm", "alice~carol", "carol")
+        b.join_group("_dm", "alice~carol", "alice")
+        b.send("_dm", "alice~carol", "carol", "new convo")
+
+    threading.Thread(target=later).start()
+    rc, msgs = run(
+        capsys, "-c", "alice", "dm", "--wait", "-t", "3", "--interval", "0.05"
+    )
+    assert rc == 0 and [m["body"] for m in msgs] == ["new convo"]
+    # unread counts are per-group, not global id arithmetic
+    run(capsys, "-c", "bob", "-p", ".llm_bus_project", "send", "noise")
+    run(capsys, "-c", "carol", "dm", "alice", "second")
+    _, convs = run(capsys, "-c", "alice", "dm")
+    assert convs == [{"peer": "carol", "unread": 1}]
+
+
+def test_hub_directory_ask(env, capsys):
+    setup(capsys)
+    run(
+        capsys,
+        "init",
+        "carol",
+        "--role",
+        "frontend",
+        "--context",
+        "Owns the React dashboard.",
+    )
+    _, d = run(capsys, "directory")
+    assert [e["name"] for e in d] == ["alice", "bob", "carol"]
+    _, d = run(capsys, "directory", "react")
+    assert [e["name"] for e in d] == ["carol"]
+
+    assert (
+        main(["-c", "alice", "ask", "who does react?", "-t", "0.1"]) == 1
+    )  # no hub yet
+    rc, info = run(capsys, "hub", "init")
+    assert rc == 0 and info["name"] == "hub"
+    _, who = run(capsys, "-c", "hub", "whoami")
+    assert who["hub"] and [e["name"] for e in who["directory"]] == [
+        "alice",
+        "bob",
+        "carol",
+        "hub",
+    ]
+
+    def hub_replies():
+        time.sleep(0.2)
+        Bus(env / "bus.db").send("_dm", "alice~hub", "hub", "carol (frontend) — dm her")
+
+    threading.Thread(target=hub_replies).start()
+    rc, msgs = run(
+        capsys, "-c", "alice", "ask", "who does react?", "-t", "3", "--interval", "0.05"
+    )
+    assert rc == 0 and "carol" in msgs[0]["body"]
+    _, msgs = run(capsys, "-c", "hub", "dm", "alice", "--all")
+    assert [m["sender"] for m in msgs] == ["alice", "hub"]
+    assert msgs[0]["body"] == "who does react?"

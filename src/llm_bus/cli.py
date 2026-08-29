@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
 
+from . import spawn as spawner
 from .config import (
+    DM_PROJECT,
+    HUB_CONTEXT,
+    HUB_NAME,
     PROJECT_FILE,
     Agent,
     ProjectRef,
     create_agent,
+    directory,
+    dm_group,
     list_agents,
     load_agent,
     load_project,
@@ -20,6 +27,7 @@ from .config import (
 )
 from .db import Bus, BusError
 from .guide import guide_text
+from .spawn import Spawn
 
 
 # --- resolution helpers ---------------------------------------------------
@@ -69,6 +77,36 @@ def _fmt_members(ms: list[dict]) -> str:
     return ", ".join(_who(m["agent"], m["role"]) for m in ms) or "-"
 
 
+def _fmt_msgs(msgs: list[dict], empty: str) -> str:
+    return "\n".join(_fmt_msg(m) for m in msgs) or empty
+
+
+def _dm_peer(me: str, group: str) -> str:
+    return group.replace(me, "", 1).strip("~")
+
+
+def _wait_loop(
+    bus, a: Agent, targets, timeout, interval, args, include_self=False, what="messages"
+):
+    """Poll (project, group) pairs (or a callable producing them) until unread messages appear."""
+    deadline = None if timeout <= 0 else time.monotonic() + timeout
+    while True:
+        hits = []
+        for project, group in targets() if callable(targets) else targets:
+            new = bus.latest(project, group, limit=1000, after=a.cursor(project, group))
+            if new:
+                a.set_cursor(project, group, new[-1]["id"])
+            hits += [m for m in new if include_self or m["sender"] != a.name]
+        if hits:
+            hits.sort(key=lambda m: m["id"])
+            _emit(args, hits, _fmt_msgs(hits, ""))
+            return 0
+        if deadline is not None and time.monotonic() >= deadline:
+            _emit(args, [], f"(timeout: no new {what})")
+            return 2
+        time.sleep(interval)
+
+
 # --- agent commands ---------------------------------------------------------
 def cmd_init(bus, args):
     try:
@@ -78,12 +116,13 @@ def cmd_init(bus, args):
             args.context,
             Path(args.dir) if args.dir else None,
             args.force,
+            spawn=Spawn(session=args.session or args.name, cmd=args.cmd, cwd=args.cwd),
         )
     except ValueError as e:
         raise BusError(str(e)) from None
     _emit(
         args,
-        {"name": a.name, "role": a.role, "dir": str(a.dir)},
+        {"name": a.name, "role": a.role, "dir": str(a.dir), "spawn": a.spawn.cmd},
         f"created agent {_who(a.name, a.role)} at {a.dir}",
     )
 
@@ -93,7 +132,7 @@ def cmd_agents(bus, args):
     lines = [
         f"{a['name']}  (invalid: {a['error']})"
         if "error" in a
-        else f"{_who(a['name'], a['role'])}  {a['dir']}"
+        else f"{_who(a['name'], a['role'])}{'  [hub]' if a.get('hub') else ''}  {a['dir']}"
         for a in agents
     ]
     _emit(args, agents, "\n".join(lines) or "(no agents)")
@@ -110,34 +149,91 @@ def cmd_remember(bus, args):
     )
 
 
+def _fmt_directory(entries: list[dict], me: str | None = None) -> str:
+    if not entries:
+        return "(no agents)"
+    out = []
+    for e in entries:
+        out.append(
+            f"* {_who(e['name'], e['role'])}"
+            + ("  [hub]" if e["hub"] else "")
+            + ("  (you)" if e["name"] == me else "")
+        )
+        for label, text in (("context", e["context"]), ("notes", e["notes"])):
+            if text:
+                out.append(f"    {label}: " + " ".join(text.split())[:300])
+    return "\n".join(out)
+
+
+def cmd_directory(bus, args):
+    entries = directory(args.query)
+    _emit(
+        args,
+        entries,
+        _fmt_directory(entries, me=args.agent.name if args.agent else None),
+    )
+
+
+def cmd_hub_init(bus, args):
+    try:
+        a = create_agent(
+            HUB_NAME,
+            "agent directory / router",
+            HUB_CONTEXT,
+            force=args.force,
+            hub=True,
+        )
+    except ValueError as e:
+        raise BusError(str(e)) from None
+    _emit(
+        args,
+        {"name": a.name, "dir": str(a.dir)},
+        f"created hub agent at {a.dir}\nSpawn it with: llm-bus -c hub whoami",
+    )
+
+
 def cmd_whoami(bus, args):
     a = _agent(args)
     pr = args.project
-    memberships = bus.memberships(a.name)
-    unread = []
-    for m in memberships:
-        last = bus.last_id(m["project"], m["group"])
-        cur = a.cursor(m["project"], m["group"])
-        unread.append({**m, "unread": max(0, last - cur), "cursor": cur})
+    unread, dms = [], []
+    for m in bus.memberships(a.name):
+        n = bus.count_after(
+            m["project"], m["group"], a.cursor(m["project"], m["group"])
+        )
+        if m["project"] == DM_PROJECT:
+            dms.append({"peer": _dm_peer(a.name, m["group"]), "unread": n})
+        else:
+            unread.append(
+                {**m, "unread": n, "cursor": a.cursor(m["project"], m["group"])}
+            )
     data = {
         "name": a.name,
         "role": a.role,
+        "hub": a.hub,
         "dir": str(a.dir),
         "context": a.context(),
         "notes": a.notes(),
-        "project": {
-            "name": pr.name,
-            "group": pr.group,
-            "file": str(pr.path) if pr.path else None,
-        }
-        if pr
-        else None,
+        "project": (
+            {
+                "name": pr.name,
+                "group": pr.group,
+                "file": str(pr.path) if pr.path else None,
+            }
+            if pr
+            else None
+        ),
         "memberships": unread,
+        "dms": dms,
+        "directory": directory() if a.hub else None,
     }
     if args.json:
         print(json.dumps(data, ensure_ascii=False))
         return
-    out = [f"YOU ARE: {_who(a.name, a.role)}", f"AGENT DIR: {a.dir}"]
+    out = [
+        f"YOU ARE: {_who(a.name, a.role)}"
+        + ("  [HUB — see DIRECTORY below]" if a.hub else ""),
+        f"AGENT DIR: {a.dir}",
+    ]
     if pr:
         out.append(
             f"PROJECT: {pr.name}"
@@ -150,13 +246,206 @@ def cmd_whoami(bus, args):
     out += [
         f"  {m['project']}/{m['group']}  unread: {m['unread']}" for m in unread
     ] or ["  (none — use `join`)"]
+    if dms:
+        out.append("DMS:")
+        out += [f"  {d['peer']}  unread: {d['unread']}" for d in dms]
     ctx, notes = a.context().strip(), a.notes().strip()
     out.append(f"\n--- CONTEXT ({a.context_path}) ---\n{ctx or '(empty)'}")
     out.append(f"\n--- NOTES ({a.notes_path}) ---\n{notes or '(empty)'}")
+    if a.hub:
+        out.append(
+            "\n--- DIRECTORY ---\n" + _fmt_directory(data["directory"], me=a.name)
+        )
     out.append(
         "\nNext: `llm-bus guide` for commands. Read unread with `read --unread`, block with `wait`."
     )
     print("\n".join(out))
+
+
+# --- on-demand agents (screen sessions) ---------------------------------------
+def _spawn_if_dead(args, peer: str) -> dict | None:
+    """Start PEER's screen session if it has a spawn cmd and isn't running. Never raises."""
+    if getattr(args, "no_spawn", False):
+        return None
+    try:
+        a = load_agent(peer)
+        if not a.spawn.cmd:
+            return None
+        r = spawner.start(a.name, a.dir, a.spawn)
+    except (ValueError, RuntimeError, OSError) as e:
+        r = {"agent": peer, "status": "error", "error": str(e)}
+    if r["status"] == "spawned" and not args.json:
+        print(f"(spawned {peer} in screen session '{r['session']}')", file=sys.stderr)
+    elif r["status"] == "error" and not args.json:
+        print(f"(could not spawn {peer}: {r['error']})", file=sys.stderr)
+    return r
+
+
+def _load_named(name: str) -> Agent:
+    try:
+        return load_agent(name)
+    except ValueError as e:
+        raise BusError(str(e)) from None
+
+
+def cmd_ps(bus, args):
+    try:
+        sessions = spawner.list_sessions()
+    except RuntimeError as e:
+        raise BusError(str(e)) from None
+    rows = []
+    for a in list_agents():
+        if "error" in a:
+            continue
+        ag = load_agent(a["dir"])
+        rows.append(
+            {
+                "name": ag.name,
+                "role": ag.role,
+                "session": ag.spawn.session,
+                "alive": ag.spawn.session in sessions,
+                "spawnable": bool(ag.spawn.cmd),
+            }
+        )
+    _emit(
+        args,
+        rows,
+        "\n".join(
+            f"{'*' if r['alive'] else ' '} {_who(r['name'], r['role'])}"
+            f"  session={r['session']}" + ("" if r["spawnable"] else "  (no spawn cmd)")
+            for r in rows
+        )
+        or "(no agents)",
+    )
+
+
+def cmd_spawn(bus, args):
+    a = _load_named(args.name)
+    if not a.spawn.cmd:
+        raise BusError(
+            f"agent '{a.name}' has no [spawn] cmd in {a.config_path}"
+            " (init --cmd ..., or edit the file)"
+        )
+    try:
+        r = spawner.start(a.name, a.dir, a.spawn)
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
+        raise BusError(f"spawn failed: {e}") from None
+    _emit(
+        args,
+        r,
+        f"{r['status']}: {a.name} (screen session '{r['session']}')"
+        + (
+            f"\n  cmd: {r['cmd']}\n  cwd: {r['cwd']}"
+            if r["status"] == "spawned"
+            else ""
+        ),
+    )
+
+
+def cmd_kill(bus, args):
+    a = _load_named(args.name)
+    try:
+        killed = spawner.kill(a.spawn)
+    except RuntimeError as e:
+        raise BusError(str(e)) from None
+    _emit(
+        args,
+        {"agent": a.name, "session": a.spawn.session, "killed": killed},
+        f"{'killed' if killed else 'not running'}: {a.name} (session '{a.spawn.session}')",
+    )
+
+
+# --- dm ------------------------------------------------------------------------
+def _dm_target(bus, me: Agent, peer: str) -> str:
+    if peer == me.name:
+        raise BusError("cannot DM yourself")
+    peer_info = next((a for a in list_agents() if a["name"] == peer), None)
+    if peer_info is None:
+        raise BusError(f"unknown agent '{peer}' (see `llm-bus agents`)")
+    g = dm_group(me.name, peer)
+    bus.ensure_group(DM_PROJECT, g)
+    bus.join_group(DM_PROJECT, g, me.name, me.role)
+    bus.join_group(
+        DM_PROJECT, g, peer, peer_info.get("role")
+    )  # both sides see the conversation
+    return g
+
+
+def _dm_targets(bus, a: Agent):
+    return [
+        (m["project"], m["group"])
+        for m in bus.memberships(a.name)
+        if m["project"] == DM_PROJECT
+    ]
+
+
+def cmd_dm(bus, args):
+    a = _agent(args)
+    if args.peer is None:
+        if args.wait:
+            return _wait_loop(
+                bus,
+                a,
+                lambda: _dm_targets(bus, a),
+                args.timeout,
+                args.interval,
+                args,
+                what="DMs",
+            )
+        convs = [
+            {
+                "peer": _dm_peer(a.name, g),
+                "unread": bus.count_after(p, g, a.cursor(p, g)),
+            }
+            for p, g in _dm_targets(bus, a)
+        ]
+        _emit(
+            args,
+            convs,
+            "\n".join(f"{c['peer']}  unread: {c['unread']}" for c in convs)
+            or "(no DMs)",
+        )
+        return 0
+    g = _dm_target(bus, a, args.peer)
+    body = sys.stdin.read().strip() if args.stdin else args.body
+    if body:
+        m = bus.send(DM_PROJECT, g, a.name, body, a.role)
+        a.set_cursor(DM_PROJECT, g, m["id"])
+        m["spawn"] = _spawn_if_dead(args, args.peer)
+        _emit(args, m, f"dm #{m['id']} → {args.peer}")
+        return 0
+    if args.wait:
+        return _wait_loop(
+            bus, a, [(DM_PROJECT, g)], args.timeout, args.interval, args, what="DMs"
+        )
+    after = 0 if args.all else a.cursor(DM_PROJECT, g)
+    msgs = bus.latest(DM_PROJECT, g, limit=args.limit, after=after)
+    if msgs:
+        a.set_cursor(DM_PROJECT, g, msgs[-1]["id"])
+    _emit(args, msgs, _fmt_msgs(msgs, "(no new DMs)"))
+    return 0
+
+
+def cmd_ask(bus, args):
+    a = _agent(args)
+    g = _dm_target(bus, a, HUB_NAME)
+    m = bus.send(DM_PROJECT, g, a.name, args.question, a.role)
+    a.set_cursor(DM_PROJECT, g, m["id"])
+    _spawn_if_dead(args, HUB_NAME)
+    if not args.json:
+        print(
+            f"asked hub (#{m['id']}), waiting up to {args.timeout:g}s...",
+            file=sys.stderr,
+        )
+    return _wait_loop(
+        bus,
+        a,
+        [(DM_PROJECT, g)],
+        args.timeout,
+        args.interval,
+        args,
+        what="reply from hub",
+    )
 
 
 # --- project / group commands --------------------------------------------------
@@ -176,10 +465,7 @@ def cmd_project_init(bus, args):
     except ValueError as e:
         raise BusError(str(e)) from None
     if args.group:
-        try:
-            bus.create_group(args.name, args.group)
-        except BusError:
-            pass
+        bus.ensure_group(args.name, args.group)
     _emit(
         args,
         {
@@ -276,33 +562,25 @@ def cmd_read(bus, args):
     msgs = bus.latest(project, group, limit=args.limit, after=after)
     if msgs and args.agent is not None and (args.unread or args.mark):
         args.agent.set_cursor(project, group, msgs[-1]["id"])
-    _emit(args, msgs, "\n".join(_fmt_msg(m) for m in msgs) or "(no messages)")
+    _emit(args, msgs, _fmt_msgs(msgs, "(no messages)"))
 
 
 def cmd_wait(bus, args):
     a = _agent(args)
     project, group, _ = _group(args, args.pos, 0)
-    after = args.after if args.after is not None else a.cursor(project, group)
-    deadline = None if args.timeout <= 0 else time.monotonic() + args.timeout
-    while True:
-        msgs = bus.latest(project, group, limit=1000, after=after)
-        if msgs:
-            a.set_cursor(project, group, msgs[-1]["id"])
-        if not args.include_self:
-            msgs = [m for m in msgs if m["sender"] != a.name]
-        if msgs:
-            _emit(args, msgs, "\n".join(_fmt_msg(m) for m in msgs))
-            return 0
-        if deadline is not None and time.monotonic() >= deadline:
-            _emit(args, [], "(timeout: no new messages)")
-            return 2
-        time.sleep(args.interval)
+    if (
+        args.after is not None
+    ):  # explicit start point overrides the stored cursor for this call
+        a.state.setdefault("cursors", {})[f"{project}/{group}"] = args.after
+    return _wait_loop(
+        bus, a, [(project, group)], args.timeout, args.interval, args, args.include_self
+    )
 
 
 def cmd_search(bus, args):
     project, group, tail = _group(args, args.pos, 1)
     msgs = bus.search(project, group, tail[0], limit=args.limit)
-    _emit(args, msgs, "\n".join(_fmt_msg(m) for m in msgs) or "(no matches)")
+    _emit(args, msgs, _fmt_msgs(msgs, "(no matches)"))
 
 
 def cmd_guide(bus, args):
@@ -320,7 +598,8 @@ def build_parser() -> argparse.ArgumentParser:
             f"  llm-bus project init demo --group dev          # writes ./{PROJECT_FILE}\n"
             f"  llm-bus -c alice -p {PROJECT_FILE} join\n"
             f"  llm-bus -c alice -p {PROJECT_FILE} send 'hello'\n"
-            f"  llm-bus -c alice -p {PROJECT_FILE} wait\n\n"
+            f"  llm-bus -c alice -p {PROJECT_FILE} wait\n"
+            "  llm-bus -c alice dm bob 'hi'   ·   llm-bus -c alice ask 'who can help with X?'\n\n"
             "Run `llm-bus guide` for the full agent-oriented guide; `llm-bus -c NAME whoami` for your context."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -354,9 +633,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--context", help="initial CONTEXT.md text")
     s.add_argument("--dir", help="create the agent folder here instead")
     s.add_argument("--force", action="store_true")
+    s.add_argument(
+        "--cmd",
+        help="shell command that runs this agent on demand ({name} {dir} {session} placeholders)",
+    )
+    s.add_argument("--session", help="screen session name (default: NAME)")
+    s.add_argument("--cwd", help="working dir for --cmd (default: agent folder)")
     s.set_defaults(fn=cmd_init)
     s = sub.add_parser("agents", help="list agents in the global agents folder")
     s.set_defaults(fn=cmd_agents)
+
+    s = sub.add_parser("ps", help="agents and whether their screen session is running")
+    s.set_defaults(fn=cmd_ps)
+    s = sub.add_parser("spawn", help="start an agent's screen session (if not running)")
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_spawn)
+    s = sub.add_parser("kill", help="quit an agent's screen session")
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_kill)
+
     s = sub.add_parser(
         "whoami", help="dump this agent's full context (-c required, -p optional)"
     )
@@ -367,6 +662,43 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("text", nargs="?")
     s.add_argument("--stdin", action="store_true")
     s.set_defaults(fn=cmd_remember)
+
+    s = sub.add_parser(
+        "directory", help="list all agents with roles/context; optional QUERY filter"
+    )
+    s.add_argument("query", nargs="?")
+    s.set_defaults(fn=cmd_directory)
+    hb = sub.add_parser("hub", help="the central directory agent").add_subparsers(
+        dest="sub", required=True
+    )
+    s = hb.add_parser("init", help=f"create the '{HUB_NAME}' agent")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_hub_init)
+    s = sub.add_parser(
+        "ask", help="DM the hub a question and wait for its reply (-c required)"
+    )
+    s.add_argument("question")
+    s.add_argument("-t", "--timeout", type=float, default=120)
+    s.add_argument("--interval", type=float, default=0.5)
+    s.add_argument("--no-spawn", action="store_true", help="don't auto-start the hub")
+    s.set_defaults(fn=cmd_ask)
+    s = sub.add_parser("dm", help="direct messages (-c required, no -p needed)")
+    s.add_argument("peer", nargs="?", help="agent name; omit to list conversations")
+    s.add_argument("body", nargs="?", help="send this; omit to read unread from PEER")
+    s.add_argument("--stdin", action="store_true", help="read body from stdin")
+    s.add_argument(
+        "--wait", action="store_true", help="block until PEER (or anyone) DMs you"
+    )
+    s.add_argument(
+        "--all", action="store_true", help="show full history, not just unread"
+    )
+    s.add_argument("-n", "--limit", type=int, default=50)
+    s.add_argument("-t", "--timeout", type=float, default=0)
+    s.add_argument("--interval", type=float, default=0.5)
+    s.add_argument(
+        "--no-spawn", action="store_true", help="don't auto-start a dead PEER on send"
+    )
+    s.set_defaults(fn=cmd_dm)
 
     pr = sub.add_parser("project", help="manage projects").add_subparsers(
         dest="sub", required=True
@@ -425,12 +757,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--unread",
         action="store_true",
-        help="only messages after -c agent's cursor; advances it",
+        help="only after -c agent's cursor; advances it",
     )
     s.add_argument(
-        "--mark",
-        action="store_true",
-        help="advance -c agent's cursor to the last shown message",
+        "--mark", action="store_true", help="advance -c agent's cursor to last shown"
     )
     s.set_defaults(fn=cmd_read)
 

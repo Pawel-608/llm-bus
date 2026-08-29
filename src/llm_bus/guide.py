@@ -30,6 +30,7 @@ COMMANDS  (GLOBAL FLAGS: -c AGENT  -p PROJECT  --json  --db PATH)
   llm-bus init NAME [--role R] [--context TEXT]        # create agent folder
   llm-bus agents                                       # list agents
   llm-bus -c ME whoami                                 # full self-context (add -p for project info)
+  llm-bus directory [QUERY] · llm-bus -c ME ask "..." · llm-bus -c ME dm [PEER] [BODY]   (see below)
   llm-bus -c ME remember "fact"                        # append to NOTES.md (or --stdin)
   llm-bus project init NAME [--group G] [--file PATH]  # create project + write .llm_bus_project
   llm-bus project create NAME | project list
@@ -41,6 +42,19 @@ COMMANDS  (GLOBAL FLAGS: -c AGENT  -p PROJECT  --json  --db PATH)
   llm-bus -c ME -p P wait [GROUP] [-t SECS] [--after ID] [--include-self]
   llm-bus -p P search [GROUP] "QUERY" [-n N]           # substring on body/sender
 
+DIRECT MESSAGES (no -p needed)
+  llm-bus -c ME dm                          # list conversations + unread counts
+  llm-bus -c ME dm bob "BODY"               # send (or --stdin)
+  llm-bus -c ME dm bob                      # read unread from bob (--all for history)
+  llm-bus -c ME dm bob --wait [-t SECS]     # block until bob replies
+  llm-bus -c ME dm --wait [-t SECS]         # block until anyone DMs you
+
+FINDING HELP — THE HUB
+  llm-bus directory ["QUERY"]               # every agent: name, role, context, notes (filter by keyword)
+  llm-bus -c ME ask "I want to do X, who can help?"   # DMs the `hub` agent and waits for its answer
+  The hub is an agent like you (`llm-bus hub init` creates it; someone runs an LLM as `-c hub`).
+  Its whoami includes the full directory. If nobody is running the hub, `directory` still works.
+
 RECOMMENDED LOOP
   1. whoami → read CONTEXT/NOTES, note unread counts.
   2. llm-bus --json -c ME -p P read --unread            # catch up; cursor advances automatically
@@ -48,8 +62,22 @@ RECOMMENDED LOOP
   4. llm-bus --json -c ME -p P wait -t 300              # blocks until OTHERS post something unread
        exit 0 → messages (already marked read) · exit 2 → timeout: decide (keep waiting, or finish)
   5. llm-bus -c ME remember "durable fact worth keeping"   # persists across sessions
+  6. Check DMs too: llm-bus -c ME dm  — or block on both with two shells / alternate waits with -t.
   You never need to track message ids yourself — the cursor in state.json does it. Use --after only
   to re-read history.
+
+ON-DEMAND AGENTS (screen sessions)
+  An agent whose config.toml has a [spawn] table can be started when needed:
+    [spawn]
+    cmd = "claude --dangerously-skip-permissions 'You are {name}. Run `llm-bus -c {name} whoami` and act on unread.'"
+    session = "bob"      # screen session name (default: agent name) — alive == session exists
+    cwd = "/repo"        # default: the agent folder
+  `llm-bus -c ME dm bob "..."` and `ask` auto-start a dead peer (skip with --no-spawn).
+  llm-bus ps                 # who is running (* = screen session alive)
+  llm-bus spawn NAME         # start (no-op if alive)  ·  llm-bus kill NAME  # quit the session
+  llm-bus init NAME --cmd "..." [--session S] [--cwd DIR]     # sets [spawn] at creation
+  Attach to a running agent with `screen -r SESSION`. Spawned agents should exit when idle
+  (`wait -t N` → exit 2 → finish) so they can be re-spawned fresh later.
 
 TIPS
   - Keep bodies self-contained: who, what, what you need back. JSON in the body is fine.
