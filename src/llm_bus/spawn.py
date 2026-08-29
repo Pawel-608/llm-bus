@@ -14,6 +14,7 @@ The `cmd` string may use {name}, {session}, {dir} placeholders.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
@@ -69,35 +70,46 @@ def is_alive(sp: Spawn) -> bool:
     return sp.session in list_sessions()
 
 
+def render_cmd(cmd: str, **vars: str) -> str:
+    """Substitute {name} {session} {dir} only; other braces (JSON, shell) are left alone."""
+    for k, v in vars.items():
+        cmd = cmd.replace("{" + k + "}", v)
+    return cmd
+
+
 def start(agent_name: str, agent_dir: Path, sp: Spawn) -> dict:
     """Start the agent's screen session. Returns status: spawned | alive | no-cmd."""
     if not sp.cmd:
         return {"agent": agent_name, "session": sp.session, "status": "no-cmd"}
+    # Serialize concurrent spawners with an advisory lock on a persistent file. flock is
+    # released by the kernel when the holder dies, so a crashed spawner can't brick the agent.
     lock = agent_dir / SPAWN_LOCK
-    try:  # serialize concurrent spawners (two senders DMing a dead agent at once)
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        return {"agent": agent_name, "session": sp.session, "status": "alive"}
-    try:
-        os.close(fd)
-        if is_alive(sp):
+    with open(lock, "a+") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
             return {"agent": agent_name, "session": sp.session, "status": "alive"}
-        cmd = sp.cmd.format(name=agent_name, session=sp.session, dir=str(agent_dir))
-        cwd = Path(sp.cwd).expanduser() if sp.cwd else agent_dir
-        subprocess.run(
-            [_screen(), "-dmS", sp.session, "sh", "-c", cmd],
-            cwd=cwd,
-            check=True,
-        )
-        return {
-            "agent": agent_name,
-            "session": sp.session,
-            "status": "spawned",
-            "cmd": cmd,
-            "cwd": str(cwd),
-        }
-    finally:
-        lock.unlink(missing_ok=True)
+        try:
+            if is_alive(sp):
+                return {"agent": agent_name, "session": sp.session, "status": "alive"}
+            cmd = render_cmd(
+                sp.cmd, name=agent_name, session=sp.session, dir=str(agent_dir)
+            )
+            cwd = Path(sp.cwd).expanduser() if sp.cwd else agent_dir
+            subprocess.run(
+                [_screen(), "-dmS", sp.session, "sh", "-c", cmd],
+                cwd=cwd,
+                check=True,
+            )
+            return {
+                "agent": agent_name,
+                "session": sp.session,
+                "status": "spawned",
+                "cmd": cmd,
+                "cwd": str(cwd),
+            }
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def kill(sp: Spawn) -> bool:

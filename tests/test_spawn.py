@@ -122,7 +122,6 @@ def test_spawn_ps_kill(env, capsys):
     assert r["killed"] is True
     _, r = run(capsys, "kill", "bob")
     assert r["killed"] is False
-    assert not (env / "home/agents/bob/.spawn.lock").exists()
 
 
 def test_dm_auto_spawns_dead_peer(env, capsys):
@@ -153,10 +152,19 @@ def test_ask_spawns_hub(env, capsys):
 
 
 def test_spawn_lock_prevents_double_start(env, capsys):
+    import fcntl
+
     run(capsys, "init", "bob", "--cmd", "true")
-    (env / "home/agents/bob/.spawn.lock").touch()  # someone else is mid-spawn
+    lock = env / "home/agents/bob/.spawn.lock"
+    lock.touch()  # a STALE lock file (crashed spawner) must not block: flock isn't held
     _, r = spawn_via_dm(capsys, "bob")
-    assert r["status"] == "alive" and "-dmS" not in "".join(screen_log(env))
+    assert r["status"] == "spawned"
+    run(capsys, "kill", "bob")
+    with open(lock, "a+") as fh:  # a HELD lock (someone mid-spawn) does block
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        _, r = spawn_via_dm(capsys, "bob")
+        assert r["status"] == "alive"
+    assert screen_log(env).count("-dmS bob sh -c true") == 1
 
 
 def test_missing_screen_is_an_error(env, capsys, monkeypatch):

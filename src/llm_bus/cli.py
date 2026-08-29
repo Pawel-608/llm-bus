@@ -17,6 +17,7 @@ from .config import (
     PROJECT_FILE,
     Agent,
     ProjectRef,
+    check_name,
     create_agent,
     directory,
     dm_group,
@@ -51,6 +52,8 @@ def _group(args, pos: list[str], n_tail: int) -> tuple[str, str, list[str]]:
     """Resolve (project, group, tail) from -p plus positionals `[GROUP] *tail`."""
     pr = _project(args)
     extra = len(pos) - n_tail
+    if extra < 0:
+        raise BusError("message body required (or --stdin)")
     if extra == 1:
         return pr.name, pos[0], pos[1:]
     if extra == 0 and pr.group:
@@ -119,7 +122,7 @@ def _wait_loop(
     while True:
         hits = []
         for project, group in targets() if callable(targets) else targets:
-            new = bus.latest(project, group, limit=1000, after=a.cursor(project, group))
+            new = bus.unread(project, group, a.cursor(project, group))
             if new:
                 a.set_cursor(project, group, new[-1]["id"])
             hits += [m for m in new if include_self or m["sender"] != a.name]
@@ -303,8 +306,8 @@ def _spawn_if_dead(args, peer: str) -> dict | None:
         if not a.spawn.cmd:
             return None
         r = spawner.start(a.name, a.dir, a.spawn)
-    except (ValueError, RuntimeError, OSError) as e:
-        r = {"agent": peer, "status": "error", "error": str(e)}
+    except Exception as e:  # noqa: BLE001 — a failed spawn must never break the send itself
+        r = {"agent": peer, "status": "error", "error": f"{type(e).__name__}: {e}"}
     if r["status"] == "spawned":
         args.bus.touch(peer, "spawned")
         if not args.json:
@@ -482,6 +485,8 @@ def cmd_dm(bus, args):
         return 0
     g = _dm_target(bus, a, args.peer)
     body = sys.stdin.read().strip() if args.stdin else args.body
+    if args.stdin and not body:
+        raise BusError("empty message")
     if body:
         m = bus.send(DM_PROJECT, g, a.name, body, a.role, reply_to=args.reply)
         a.set_cursor(DM_PROJECT, g, m["id"])
@@ -492,8 +497,10 @@ def cmd_dm(bus, args):
         return _wait_loop(
             bus, a, [(DM_PROJECT, g)], args.timeout, args.interval, args, what="DMs"
         )
-    after = 0 if args.all else a.cursor(DM_PROJECT, g)
-    msgs = bus.latest(DM_PROJECT, g, limit=args.limit, after=after)
+    if args.all:
+        msgs = bus.latest(DM_PROJECT, g, limit=args.limit)
+    else:
+        msgs = bus.unread(DM_PROJECT, g, a.cursor(DM_PROJECT, g), limit=args.limit)
     if msgs:
         a.set_cursor(DM_PROJECT, g, msgs[-1]["id"])
     _emit(args, msgs, _fmt_msgs(msgs, "(no new DMs)"))
@@ -523,12 +530,23 @@ def cmd_ask(bus, args):
 
 
 # --- project / group commands --------------------------------------------------
+def _checked(kind: str, value: str) -> str:
+    try:
+        return check_name(kind, value)
+    except ValueError as e:
+        raise BusError(str(e)) from None
+
+
 def cmd_project_create(bus, args):
+    _checked("project", args.name)
     p = bus.create_project(args.name)
     _emit(args, p, f"created project '{p['name']}'")
 
 
 def cmd_project_init(bus, args):
+    _checked("project", args.name)
+    if args.group:
+        _checked("group", args.group)
     try:
         bus.create_project(args.name)
         created = True
@@ -566,7 +584,7 @@ def cmd_project_list(bus, args):
 
 def cmd_group_create(bus, args):
     pr = _project(args)
-    g = bus.create_group(pr.name, args.name)
+    g = bus.create_group(pr.name, _checked("group", args.name))
     _emit(args, g, f"created group '{pr.name}/{g['name']}'")
 
 
@@ -640,10 +658,11 @@ def cmd_read(bus, args):
         _emit(args, msgs, _fmt_msgs(msgs, "(empty thread)"))
         return
     project, group, _ = _group(args, args.pos, 0)
-    after = args.after
     if args.unread:
-        after = max(after, _agent(args).cursor(project, group))
-    msgs = bus.latest(project, group, limit=args.limit, after=after)
+        after = max(args.after, _agent(args).cursor(project, group))
+        msgs = bus.unread(project, group, after, limit=args.limit)
+    else:
+        msgs = bus.latest(project, group, limit=args.limit, after=args.after)
     if msgs and args.agent is not None and (args.unread or args.mark):
         args.agent.set_cursor(project, group, msgs[-1]["id"])
     _emit(args, msgs, _fmt_msgs(msgs, "(no messages)"))
@@ -676,9 +695,7 @@ def _collect_unread(bus, a: Agent, per_target: int = 20) -> list[dict]:
     """Unread messages from others across all groups + DMs; advances cursors."""
     hits = []
     for project, group in _all_targets(bus, a):
-        new = bus.latest(
-            project, group, limit=per_target, after=a.cursor(project, group)
-        )
+        new = bus.unread(project, group, a.cursor(project, group), limit=per_target)
         if new:
             a.set_cursor(project, group, new[-1]["id"])
         for m in new:
@@ -712,6 +729,19 @@ def cmd_hook(bus, args):
     return 0
 
 
+HOOK_CMD_RE = re.compile(r"^llm-bus\s+-c\s+(\S+)\s+hook$")
+
+
+def _hook_targets_agent(command: str, a: Agent) -> bool:
+    m = HOOK_CMD_RE.match(command.strip())
+    if not m:
+        return False
+    try:
+        return load_agent(m.group(1)).dir.resolve() == a.dir.resolve()
+    except ValueError:
+        return False
+
+
 def cmd_install_hook(bus, args):
     a = _agent(args)
     path = Path(args.file)
@@ -721,10 +751,19 @@ def cmd_install_hook(bus, args):
             settings = json.loads(path.read_text() or "{}")
         except json.JSONDecodeError as e:
             raise BusError(f"{path}: invalid JSON: {e}") from None
+        if not isinstance(settings, dict):
+            raise BusError(f"{path}: expected a JSON object at top level")
     cmd = f"llm-bus -c {args.agent_ref} hook"
-    stop = settings.setdefault("hooks", {}).setdefault("Stop", [])
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict) or not isinstance(hooks.get("Stop", []), list):
+        raise BusError(f"{path}: 'hooks' / 'hooks.Stop' have an unexpected shape")
+    stop = hooks.setdefault("Stop", [])
     already = any(
-        h.get("command") == cmd for entry in stop for h in entry.get("hooks", [])
+        _hook_targets_agent(h.get("command", ""), a)
+        for entry in stop
+        if isinstance(entry, dict)
+        for h in entry.get("hooks", [])
+        if isinstance(h, dict)
     )
     if not already:
         stop.append({"hooks": [{"type": "command", "command": cmd}]})
@@ -1017,7 +1056,9 @@ def main(argv: list[str] | None = None) -> int:
     bus = Bus(Path(args.db) if args.db else None)
     args.bus = bus
     try:
-        if args.agent is not None and args.cmd != "hook":
+        if (
+            args.agent is not None
+        ):  # every command, incl. the Stop hook, is a liveness signal
             bus.touch(args.agent.name, args.cmd)
         return args.fn(bus, args) or 0
     except BusError as e:

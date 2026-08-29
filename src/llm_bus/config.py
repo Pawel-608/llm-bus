@@ -13,8 +13,10 @@ Project: .llm_bus_project TOML file, usually in the repo   (-p PATH | -p NAME)
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +36,18 @@ def bus_home() -> Path:
 
 def agents_dir() -> Path:
     return bus_home() / "agents"
+
+
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def check_name(kind: str, value: str) -> str:
+    """Agent/project/group/session names: safe in paths, cursor keys, DM group ids, screen, sh."""
+    if not NAME_RE.match(value or ""):
+        raise ValueError(
+            f"invalid {kind} name {value!r}: use letters, digits, '.', '_', '-' (must start alphanumeric)"
+        )
+    return value
 
 
 def _toml_str(v: str) -> str:
@@ -110,6 +124,16 @@ class Agent:
     def _save_state(self) -> None:
         """Merge with what's on disk (another process as the same agent may have advanced
         cursors meanwhile), then write atomically via tmp + os.replace."""
+        with open(self.dir / ".state.lock", "a+") as lk:
+            fcntl.flock(
+                lk, fcntl.LOCK_EX
+            )  # serialize read-merge-write across processes
+            try:
+                self._merge_and_write()
+            finally:
+                fcntl.flock(lk, fcntl.LOCK_UN)
+
+    def _merge_and_write(self) -> None:
         disk = _read_json(self.state_path)
         merged = dict(disk)
         merged.update({k: v for k, v in self.state.items() if k != "cursors"})
@@ -175,6 +199,9 @@ def create_agent(
     hub=False,
     spawn: Spawn | None = None,
 ) -> Agent:
+    check_name("agent", name)
+    if spawn and spawn.session:
+        check_name("session", spawn.session)
     d = dir or agents_dir() / name
     cfg = d / CONFIG_FILE
     if cfg.exists() and not force:
@@ -271,6 +298,9 @@ def load_project(ref: str) -> ProjectRef:
 
 
 def write_project_file(path: Path, name: str, group: str | None, force=False) -> Path:
+    check_name("project", name)
+    if group:
+        check_name("group", group)
     if path.is_dir():
         path = path / PROJECT_FILE
     if path.exists() and not force:

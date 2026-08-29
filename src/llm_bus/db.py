@@ -85,7 +85,11 @@ class Bus:
         for table, col, ddl in MIGRATIONS:
             cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in cols:
-                self.conn.execute(ddl)
+                try:
+                    self.conn.execute(ddl)
+                except sqlite3.OperationalError as e:  # another process migrated first
+                    if "duplicate column" not in str(e).lower():
+                        raise
 
     def close(self) -> None:
         self.conn.close()
@@ -287,6 +291,18 @@ class Bus:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def unread(
+        self, project: str, group: str, after: int, limit: int = 1000
+    ) -> list[dict]:
+        """OLDEST `limit` messages with id > after. Callers advance the cursor to the last one
+        returned, so anything beyond `limit` stays unread instead of being skipped."""
+        g = self.get_group(project, group)
+        rows = self.conn.execute(
+            "SELECT * FROM messages WHERE group_id=? AND id>? ORDER BY id ASC LIMIT ?",
+            (g["id"], after, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def last_id(self, project: str, group: str) -> int:
         g = self.get_group(project, group)
         row = self.conn.execute(
@@ -306,10 +322,11 @@ class Bus:
         self, project: str, group: str, query: str, limit: int = 50
     ) -> list[dict]:
         g = self.get_group(project, group)
+        esc = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         rows = self.conn.execute(
             """SELECT * FROM messages
-               WHERE group_id=? AND (body LIKE ? OR sender LIKE ?)
+               WHERE group_id=? AND (body LIKE ? ESCAPE '\\' OR sender LIKE ? ESCAPE '\\')
                ORDER BY id DESC LIMIT ?""",
-            (g["id"], f"%{query}%", f"%{query}%", limit),
+            (g["id"], f"%{esc}%", f"%{esc}%", limit),
         ).fetchall()
         return [dict(r) for r in rows][::-1]

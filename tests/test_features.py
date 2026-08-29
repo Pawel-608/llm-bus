@@ -208,11 +208,11 @@ def test_presence_in_ps(env, capsys):
     by = {r["name"]: r for r in rows}
     assert by["alice"]["last_cmd"] == "join" and by["alice"]["idle_s"] < 5
     assert by["zed"]["last_seen"] is None
-    # the hook itself doesn't count as activity
+    # the Stop hook firing IS activity (otherwise hook-driven agents look idle to reap)
     main(["-c", "alice", "hook"])
     capsys.readouterr()
     _, rows = run(capsys, "ps")
-    assert {r["name"]: r for r in rows}["alice"]["last_cmd"] == "join"
+    assert {r["name"]: r for r in rows}["alice"]["last_cmd"] == "hook"
 
 
 def test_reap(env, capsys):
@@ -241,3 +241,126 @@ def test_reap(env, capsys):
     # --idle overrides per-agent config (w3 has none but is idle 999m)
     _, reaped = run(capsys, "reap", "--idle", "100")
     assert [e["agent"] for e in reaped] == ["w3"]
+
+
+# --- review fixes -------------------------------------------------------------------
+def test_unread_burst_never_skips_messages(env, capsys):
+    setup(capsys)
+    b = Bus(env / "bus.db")
+    for i in range(30):
+        b.send("p", "dev", "bob", f"m{i}")
+    _, msgs = run(capsys, "-c", "alice", *P, "read", "--unread", "-n", "20")
+    assert [m["body"] for m in msgs] == [f"m{i}" for i in range(20)]  # oldest first
+    _, msgs = run(capsys, "-c", "alice", *P, "read", "--unread", "-n", "20")
+    assert [m["body"] for m in msgs] == [
+        f"m{i}" for i in range(20, 30)
+    ]  # remainder, not lost
+    _, msgs = run(capsys, "-c", "alice", *P, "read", "--unread")
+    assert msgs == []
+    # same for DMs and the hook
+    for i in range(5):
+        run(capsys, "-c", "bob", "dm", "alice", f"d{i}")
+    _, msgs = run(capsys, "-c", "alice", "dm", "bob", "-n", "2")
+    assert [m["body"] for m in msgs] == ["d0", "d1"]
+    _, msgs = run(capsys, "-c", "alice", "dm", "bob")
+    assert [m["body"] for m in msgs] == ["d2", "d3", "d4"]
+    _, who = run(capsys, "-c", "alice", "whoami")
+    assert who["dms"] == [{"peer": "bob", "unread": 0}]
+
+
+def test_spawn_cmd_with_braces_and_failed_screen(env, capsys):
+    setup(capsys)
+    run(capsys, "init", "carol", "--cmd", 'echo {"k": 1} && run {name} in {dir}')
+    rc, m = run(capsys, "-c", "alice", "dm", "carol", "hi")
+    assert rc == 0 and m["spawn"]["status"] == "spawned"
+    assert (
+        m["spawn"]["cmd"]
+        == f'echo {{"k": 1}} && run carol in {env / "home/agents/carol"}'
+    )
+    # screen exiting non-zero must not crash the send
+    (env / "screen").write_text("#!/bin/sh\nexit 3\n")
+    run(capsys, "init", "dave", "--cmd", "true")
+    rc, m = run(capsys, "-c", "alice", "dm", "dave", "hi")
+    assert rc == 0 and m["spawn"]["status"] == "error"
+    assert "CalledProcessError" in m["spawn"]["error"]
+
+
+def test_name_validation(env, capsys):
+    assert main(["init", "a~b"]) == 1
+    assert main(["init", "has space"]) == 1
+    assert main(["init", "--", "-dash"]) == 1
+    assert main(["init", "ok.name_1-x"]) == 0
+    assert main(["init", "s", "--cmd", "true", "--session", "bad name"]) == 1
+    assert main(["project", "create", "p/q"]) == 1
+    assert main(["project", "init", "p", "--group", "g/h"]) == 1
+    assert main(["project", "init", "p", "--group", "g"]) == 0
+    assert main(["-p", "p", "group", "create", "bad~group"]) == 1
+    capsys.readouterr()
+
+
+def test_search_escapes_like_wildcards(env, capsys):
+    setup(capsys)
+    b = Bus(env / "bus.db")
+    b.send("p", "dev", "bob", "100% done")
+    b.send("p", "dev", "bob", "1000 done")
+    b.send("p", "dev", "bob", "a_b")
+    b.send("p", "dev", "bob", "aXb")
+    _, r = run(capsys, *P, "search", "100%")
+    assert [m["body"] for m in r] == ["100% done"]
+    _, r = run(capsys, *P, "search", "a_b")
+    assert [m["body"] for m in r] == ["a_b"]
+
+
+def test_send_and_dm_error_messages(env, capsys):
+    setup(capsys)
+    assert main(["-c", "alice", "-p", ".llm_bus_project", "send"]) == 1
+    assert "body required" in capsys.readouterr().err
+    import io
+
+    import pytest as _pt
+
+    with _pt.MonkeyPatch.context() as mp:
+        mp.setattr("sys.stdin", io.StringIO("   "))
+        assert main(["-c", "alice", "dm", "bob", "--stdin"]) == 1
+    assert "empty message" in capsys.readouterr().err
+
+
+def test_install_hook_rejects_bad_shapes_and_dedupes_by_agent(env, capsys):
+    setup(capsys)
+    (env / "bad.json").write_text("[1, 2]")
+    assert main(["-c", "alice", "install-hook", "--file", "bad.json"]) == 1
+    run(capsys, "-c", "alice", "install-hook", "--file", "s.json")
+    # same agent referenced by folder path → recognised as already installed
+    _, info = run(
+        capsys, "-c", str(env / "home/agents/alice"), "install-hook", "--file", "s.json"
+    )
+    assert not info["installed"]
+    assert len(json.loads((env / "s.json").read_text())["hooks"]["Stop"]) == 1
+
+
+def test_concurrent_first_open_migration(env):
+    import sqlite3
+
+    db = env / "old2.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT '');
+           CREATE TABLE groups(id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', UNIQUE(project_id, name));
+           CREATE TABLE project_members(project_id INTEGER NOT NULL, agent TEXT NOT NULL, joined_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(project_id, agent));
+           CREATE TABLE group_members(group_id INTEGER NOT NULL, agent TEXT NOT NULL, joined_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(group_id, agent));
+           CREATE TABLE messages(id INTEGER PRIMARY KEY, group_id INTEGER NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '');"""
+    )
+    con.commit()
+    con.close()
+    errors = []
+
+    def open_bus():
+        try:
+            Bus(db).close()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    ts = [threading.Thread(target=open_bus) for _ in range(8)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert errors == []
