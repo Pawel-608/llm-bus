@@ -264,3 +264,32 @@ def test_hub_directory_ask(env, capsys):
     _, msgs = run(capsys, "-c", "hub", "dm", "alice", "--all")
     assert [m["sender"] for m in msgs] == ["alice", "hub"]
     assert msgs[0]["body"] == "who does react?"
+
+
+def test_migrates_pre_role_schema(env):
+    import sqlite3
+
+    db = env / "old.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+             created_at TEXT NOT NULL DEFAULT '');
+           CREATE TABLE groups(id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, name TEXT NOT NULL,
+             created_at TEXT NOT NULL DEFAULT '', UNIQUE(project_id, name));
+           CREATE TABLE project_members(project_id INTEGER NOT NULL, agent TEXT NOT NULL,
+             joined_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(project_id, agent));
+           CREATE TABLE group_members(group_id INTEGER NOT NULL, agent TEXT NOT NULL,
+             joined_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(group_id, agent));
+           CREATE TABLE messages(id INTEGER PRIMARY KEY, group_id INTEGER NOT NULL, sender TEXT NOT NULL,
+             body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '');"""
+    )
+    con.commit()
+    con.close()
+    b = Bus(db)
+    b.create_project("p")
+    b.create_group("p", "g")
+    b.join_group("p", "g", "alice", "dev")
+    m = b.send("p", "g", "alice", "hi", "dev", reply_to=None)
+    assert m["role"] == "dev" and b.group_members("p", "g") == [
+        {"agent": "alice", "role": "dev"}
+    ]

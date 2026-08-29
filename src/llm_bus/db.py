@@ -50,7 +50,10 @@ CREATE TABLE IF NOT EXISTS presence (
 """
 
 MIGRATIONS = [
-    # (table, column, ddl)
+    # (table, column, ddl) — applied when `column` is missing, so old DBs upgrade in place
+    ("project_members", "role", "ALTER TABLE project_members ADD COLUMN role TEXT"),
+    ("group_members", "role", "ALTER TABLE group_members ADD COLUMN role TEXT"),
+    ("messages", "role", "ALTER TABLE messages ADD COLUMN role TEXT"),
     (
         "messages",
         "reply_to",

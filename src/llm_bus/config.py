@@ -37,7 +37,7 @@ def agents_dir() -> Path:
 
 
 def _toml_str(v: str) -> str:
-    return json.dumps(v)  # valid TOML basic string
+    return json.dumps(v, ensure_ascii=False)  # valid TOML basic string
 
 
 # --- agent -------------------------------------------------------------
