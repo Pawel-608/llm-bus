@@ -221,7 +221,7 @@ def test_reap(env, capsys):
     run(capsys, "init", "w2", "--cmd", "echo {name}", "--idle-timeout", "10")
     run(capsys, "init", "w3", "--cmd", "echo {name}")  # no idle_timeout → never reaped
     for w in ("w1", "w2", "w3"):
-        run(capsys, "spawn", w)
+        run(capsys, "-c", "alice", "dm", w, "wake up")
     cfg = (env / "home/agents/w1/config.toml").read_text()
     assert "idle_timeout = 10" in cfg
     b = Bus(env / "bus.db")

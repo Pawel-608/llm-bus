@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -417,29 +416,6 @@ def cmd_reap(bus, args):
     )
 
 
-def cmd_spawn(bus, args):
-    a = _load_named(args.name)
-    if not a.spawn.cmd:
-        raise BusError(
-            f"agent '{a.name}' has no [spawn] cmd in {a.config_path}"
-            " (init --cmd ..., or edit the file)"
-        )
-    try:
-        r = spawner.start(a.name, a.dir, a.spawn)
-    except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
-        raise BusError(f"spawn failed: {e}") from None
-    _emit(
-        args,
-        r,
-        f"{r['status']}: {a.name} (screen session '{r['session']}')"
-        + (
-            f"\n  cmd: {r['cmd']}\n  cwd: {r['cwd']}"
-            if r["status"] == "spawned"
-            else ""
-        ),
-    )
-
-
 def cmd_kill(bus, args):
     a = _load_named(args.name)
     try:
@@ -837,9 +813,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("ps", help="agents and whether their screen session is running")
     s.set_defaults(fn=cmd_ps)
-    s = sub.add_parser("spawn", help="start an agent's screen session (if not running)")
-    s.add_argument("name")
-    s.set_defaults(fn=cmd_spawn)
     s = sub.add_parser("kill", help="quit an agent's screen session")
     s.add_argument("name")
     s.set_defaults(fn=cmd_kill)

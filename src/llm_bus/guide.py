@@ -89,7 +89,7 @@ ON-DEMAND AGENTS (screen sessions)
     idle_timeout = 30    # minutes; `llm-bus reap` kills the session if the agent hasn't used the bus
   `dm bob "..."`, `ask`, and `send "@bob ..."` auto-start a dead peer (skip with --no-spawn).
   llm-bus ps                 # who is running (* = alive), last bus command + how long ago
-  llm-bus spawn NAME         # start (no-op if alive)  ·  llm-bus kill NAME  # quit the session
+  There is no "start" command: messaging an agent is how it gets started.  llm-bus kill NAME  # quit
   llm-bus reap [--dry-run] [--idle MIN]   # kill alive-but-idle sessions (cron it)
   llm-bus init NAME --cmd "..." [--session S] [--cwd DIR] [--idle-timeout MIN]
   Attach to a running agent with `screen -r SESSION`. Spawned agents should exit when idle

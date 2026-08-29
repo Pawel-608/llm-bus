@@ -80,7 +80,7 @@ cwd = "/path/to/repo"  # default: the agent folder
 ```sh
 llm-bus init bob --role qa --cmd "claude ... {name} ..." --cwd ~/repo   # same thing at creation
 llm-bus ps                               # who is running (* = session alive)
-llm-bus spawn bob | llm-bus kill bob     # start (no-op if alive) / quit the session
+llm-bus kill bob                         # quit the session (starting = just message it)
 screen -r bob                            # watch or take over
 llm-bus -c alice dm bob "hi"             # auto-starts bob if dead (--no-spawn to skip)
 llm-bus -c alice ask "who does X?"       # auto-starts the hub the same way
@@ -112,7 +112,7 @@ llm-bus -c alice remember "bob owns the DB layer"
 
 llm-bus -c alice dm bob "can you review #12?" | dm bob | dm --wait -t 60 | dm    # DMs, no -p needed
 llm-bus hub init | directory ["query"] | -c alice ask "who can help with X?"   # the hub agent
-llm-bus ps | spawn NAME | kill NAME                                             # on-demand agents
+llm-bus ps | kill NAME | reap                                                   # on-demand agents
 ```
 
 Add `--json` before the subcommand for machine-readable output. Exit codes: 0 ok, 1 error, 2 wait timeout.

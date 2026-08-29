@@ -57,6 +57,18 @@ def screen_log(env):
     return p.read_text().splitlines() if p.exists() else []
 
 
+def spawn_via_dm(capsys, peer, *flags):
+    """The only way to start an agent is to message it: DM from a throwaway 'alice'."""
+    if (
+        not (os.environ["LLM_BUS_HOME"] + "/agents/alice/config.toml")
+        or main(["-c", "alice", "whoami"]) != 0
+    ):
+        main(["--json", "init", "alice"])
+    capsys.readouterr()
+    rc, m = run(capsys, "-c", "alice", "dm", peer, "wake up", *flags)
+    return rc, (m or {}).get("spawn")
+
+
 def test_init_writes_spawn_table(env, capsys):
     rc, info = run(
         capsys,
@@ -89,18 +101,22 @@ def test_spawn_ps_kill(env, capsys):
     run(capsys, "init", "bob", "--cmd", "sleep 1 # {name}")
     run(capsys, "init", "carol")  # no cmd
 
-    rc, r = run(capsys, "spawn", "bob")
+    rc, r = spawn_via_dm(capsys, "bob")
     assert rc == 0 and r["status"] == "spawned" and r["cmd"] == "sleep 1 # bob"
     assert r["cwd"] == str(env / "home/agents/bob")
     assert "-dmS bob sh -c sleep 1 # bob" in screen_log(env)
 
-    _, r = run(capsys, "spawn", "bob")  # idempotent
+    _, r = spawn_via_dm(capsys, "bob")  # idempotent
     assert r["status"] == "alive"
     assert screen_log(env).count("-dmS bob sh -c sleep 1 # bob") == 1
 
     _, rows = run(capsys, "ps")
-    assert {x["name"]: x["alive"] for x in rows} == {"bob": True, "carol": False}
-    assert main(["spawn", "carol"]) == 1  # no cmd
+    assert {x["name"]: x["alive"] for x in rows if x["name"] != "alice"} == {
+        "bob": True,
+        "carol": False,
+    }
+    _, r = spawn_via_dm(capsys, "carol")
+    assert r is None  # no cmd → nothing to start
 
     _, r = run(capsys, "kill", "bob")
     assert r["killed"] is True
@@ -139,14 +155,13 @@ def test_ask_spawns_hub(env, capsys):
 def test_spawn_lock_prevents_double_start(env, capsys):
     run(capsys, "init", "bob", "--cmd", "true")
     (env / "home/agents/bob/.spawn.lock").touch()  # someone else is mid-spawn
-    _, r = run(capsys, "spawn", "bob")
+    _, r = spawn_via_dm(capsys, "bob")
     assert r["status"] == "alive" and "-dmS" not in "".join(screen_log(env))
 
 
 def test_missing_screen_is_an_error(env, capsys, monkeypatch):
     monkeypatch.setenv("LLM_BUS_SCREEN", str(env / "nope"))
     run(capsys, "init", "bob", "--cmd", "true")
-    assert main(["spawn", "bob"]) == 1
     assert main(["ps"]) == 1
     # but sending a DM still succeeds; the spawn failure is only a warning
     run(capsys, "init", "alice")
@@ -171,7 +186,7 @@ def test_real_screen_roundtrip(tmp_path, monkeypatch, capsys):
         f"echo {{name}} > {marker}; sleep 30",
     )
     try:
-        _, r = run(capsys, "spawn", "bob")
+        _, r = spawn_via_dm(capsys, "bob")
         assert r["status"] == "spawned"
         for _ in range(50):
             if marker.exists():
