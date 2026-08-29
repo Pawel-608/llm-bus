@@ -179,6 +179,12 @@ def load_agent(ref: str) -> Agent:
         raise ValueError(f"{cfg}: invalid TOML: {e}") from None
     if not data.get("name"):
         raise ValueError(f"{cfg}: missing required key 'name'")
+    try:
+        check_name(
+            "agent", data["name"]
+        )  # hand-edited configs must obey the same rules
+    except ValueError as e:
+        raise ValueError(f"{cfg}: {e}") from None
     state = _read_json(d / STATE_FILE)
     return Agent(
         name=data["name"],

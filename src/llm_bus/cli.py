@@ -48,12 +48,17 @@ def _project(args) -> ProjectRef:
     return args.project
 
 
-def _group(args, pos: list[str], n_tail: int) -> tuple[str, str, list[str]]:
+def _group(
+    args, pos: list[str], n_tail: int, tail_name: str = "message body"
+) -> tuple[str, str, list[str]]:
     """Resolve (project, group, tail) from -p plus positionals `[GROUP] *tail`."""
     pr = _project(args)
     extra = len(pos) - n_tail
     if extra < 0:
-        raise BusError("message body required (or --stdin)")
+        raise BusError(
+            f"{tail_name} required"
+            + (" (or --stdin)" if tail_name == "message body" else "")
+        )
     if extra == 1:
         return pr.name, pos[0], pos[1:]
     if extra == 0 and pr.group:
@@ -729,6 +734,8 @@ def cmd_hook(bus, args):
     return 0
 
 
+# Matches only the exact shape install-hook writes. A hand-written entry with extra flags or an
+# absolute binary path won't be recognised and re-install appends a second entry — acceptable.
 HOOK_CMD_RE = re.compile(r"^llm-bus\s+-c\s+(\S+)\s+hook$")
 
 
@@ -782,7 +789,7 @@ def cmd_install_hook(bus, args):
 
 
 def cmd_search(bus, args):
-    project, group, tail = _group(args, args.pos, 1)
+    project, group, tail = _group(args, args.pos, 1, tail_name="search QUERY")
     msgs = bus.search(project, group, tail[0], limit=args.limit)
     _emit(args, msgs, _fmt_msgs(msgs, "(no matches)"))
 

@@ -364,3 +364,13 @@ def test_concurrent_first_open_migration(env):
     [t.start() for t in ts]
     [t.join() for t in ts]
     assert errors == []
+
+
+def test_review_nits(env, capsys):
+    setup(capsys)
+    assert main(["-p", ".llm_bus_project", "search"]) == 1
+    assert "search QUERY required" in capsys.readouterr().err
+    cfg = env / "home/agents/alice/config.toml"
+    cfg.write_text(cfg.read_text().replace('name = "alice"', 'name = "a~b"'))
+    assert main(["-c", "alice", "whoami"]) == 1
+    assert "invalid agent name" in capsys.readouterr().err
