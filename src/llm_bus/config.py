@@ -105,7 +105,32 @@ class Agent:
         key = f"{project}/{group}"
         if mid > int(cur.get(key, 0)):
             cur[key] = mid
-            self.state_path.write_text(json.dumps(self.state, indent=2) + "\n")
+            self._save_state()
+
+    def _save_state(self) -> None:
+        """Merge with what's on disk (another process as the same agent may have advanced
+        cursors meanwhile), then write atomically via tmp + os.replace."""
+        disk = _read_json(self.state_path)
+        merged = dict(disk)
+        merged.update({k: v for k, v in self.state.items() if k != "cursors"})
+        cursors = dict(disk.get("cursors", {}))
+        for k, v in self.state.get("cursors", {}).items():
+            cursors[k] = max(int(v), int(cursors.get(k, 0)))
+        merged["cursors"] = cursors
+        self.state["cursors"] = dict(cursors)
+        tmp = self.state_path.with_name(f".{STATE_FILE}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(merged, indent=2) + "\n")
+        os.replace(tmp, self.state_path)
+
+
+def _read_json(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def resolve_agent_dir(ref: str) -> Path:
@@ -130,13 +155,7 @@ def load_agent(ref: str) -> Agent:
         raise ValueError(f"{cfg}: invalid TOML: {e}") from None
     if not data.get("name"):
         raise ValueError(f"{cfg}: missing required key 'name'")
-    state = {}
-    sp = d / STATE_FILE
-    if sp.is_file():
-        try:
-            state = json.loads(sp.read_text())
-        except json.JSONDecodeError:
-            state = {}
+    state = _read_json(d / STATE_FILE)
     return Agent(
         name=data["name"],
         role=data.get("role"),
@@ -172,6 +191,8 @@ def create_agent(
             lines.append(f"session = {_toml_str(spawn.session)}")
         if spawn.cwd:
             lines.append(f"cwd = {_toml_str(spawn.cwd)}")
+        if spawn.idle_timeout is not None:
+            lines.append(f"idle_timeout = {spawn.idle_timeout:g}")
     cfg.write_text("\n".join(lines) + "\n")
     ctx = d / CONTEXT_FILE
     if context is not None or not ctx.exists():

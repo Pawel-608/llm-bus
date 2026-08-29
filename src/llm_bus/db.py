@@ -42,7 +42,21 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, id);
+CREATE TABLE IF NOT EXISTS presence (
+    agent TEXT PRIMARY KEY,
+    last_seen REAL NOT NULL,
+    last_cmd TEXT
+);
 """
+
+MIGRATIONS = [
+    # (table, column, ddl)
+    (
+        "messages",
+        "reply_to",
+        "ALTER TABLE messages ADD COLUMN reply_to INTEGER REFERENCES messages(id)",
+    ),
+]
 
 
 class BusError(Exception):
@@ -65,6 +79,10 @@ class Bus:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        for table, col, ddl in MIGRATIONS:
+            cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self.conn.execute(ddl)
 
     def close(self) -> None:
         self.conn.close()
@@ -191,14 +209,63 @@ class Bus:
 
     # --- messages -----------------------------------------------------
     def send(
-        self, project: str, group: str, sender: str, body: str, role: str | None = None
+        self,
+        project: str,
+        group: str,
+        sender: str,
+        body: str,
+        role: str | None = None,
+        reply_to: int | None = None,
     ) -> dict:
         g = self.get_group(project, group)
+        if reply_to is not None:
+            parent = self.conn.execute(
+                "SELECT group_id FROM messages WHERE id=?", (reply_to,)
+            ).fetchone()
+            if parent is None:
+                raise BusError(f"message #{reply_to} not found")
+            if parent["group_id"] != g["id"]:
+                raise BusError(f"message #{reply_to} is in a different group")
         cur = self.conn.execute(
-            "INSERT INTO messages(group_id, sender, role, body) VALUES (?,?,?,?)",
-            (g["id"], sender, role, body),
+            "INSERT INTO messages(group_id, sender, role, body, reply_to) VALUES (?,?,?,?,?)",
+            (g["id"], sender, role, body, reply_to),
         )
         return self._message(cur.lastrowid)
+
+    def thread(self, mid: int) -> list[dict]:
+        """Root of #mid's thread plus every (nested) reply, oldest first."""
+        root = self.conn.execute(
+            """WITH RECURSIVE up(id, reply_to) AS (
+                   SELECT id, reply_to FROM messages WHERE id=?
+                   UNION ALL
+                   SELECT m.id, m.reply_to FROM messages m JOIN up ON m.id=up.reply_to
+               ) SELECT id FROM up WHERE reply_to IS NULL""",
+            (mid,),
+        ).fetchone()
+        if root is None:
+            raise BusError(f"message #{mid} not found")
+        rows = self.conn.execute(
+            """WITH RECURSIVE down(id) AS (
+                   SELECT ? UNION ALL
+                   SELECT m.id FROM messages m JOIN down ON m.reply_to=down.id
+               ) SELECT * FROM messages WHERE id IN down ORDER BY id""",
+            (root["id"],),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- presence -------------------------------------------------------
+    def touch(self, agent: str, cmd: str, now: float | None = None) -> None:
+        import time as _t
+
+        self.conn.execute(
+            """INSERT INTO presence(agent, last_seen, last_cmd) VALUES (?,?,?)
+               ON CONFLICT(agent) DO UPDATE SET last_seen=excluded.last_seen, last_cmd=excluded.last_cmd""",
+            (agent, now if now is not None else _t.time(), cmd),
+        )
+
+    def presence(self) -> dict[str, dict]:
+        rows = self.conn.execute("SELECT * FROM presence").fetchall()
+        return {r["agent"]: dict(r) for r in rows}
 
     def _message(self, mid: int) -> dict:
         row = self.conn.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()

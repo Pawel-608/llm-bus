@@ -73,15 +73,16 @@ def test_init_writes_spawn_table(env, capsys):
     cfg = (env / "home/agents/bob/config.toml").read_text()
     assert "[spawn]" in cfg and 'session = "bob-s"' in cfg and f'cwd = "{env}"' in cfg
     _, rows = run(capsys, "ps")
-    assert rows == [
-        {
-            "name": "bob",
-            "role": None,
-            "session": "bob-s",
-            "alive": False,
-            "spawnable": True,
-        }
-    ]
+    assert len(rows) == 1
+    assert {
+        k: rows[0][k] for k in ("name", "role", "session", "alive", "spawnable")
+    } == {
+        "name": "bob",
+        "role": None,
+        "session": "bob-s",
+        "alive": False,
+        "spawnable": True,
+    }
 
 
 def test_spawn_ps_kill(env, capsys):

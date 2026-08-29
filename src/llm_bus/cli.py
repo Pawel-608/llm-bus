@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -70,7 +71,33 @@ def _who(name: str, role: str | None) -> str:
 
 def _fmt_msg(m: dict) -> str:
     ts = m["created_at"][:19].replace("T", " ")
-    return f"#{m['id']} [{ts}] {_who(m['sender'], m.get('role'))}: {m['body']}"
+    reply = f" ↳#{m['reply_to']}" if m.get("reply_to") else ""
+    return f"#{m['id']}{reply} [{ts}] {_who(m['sender'], m.get('role'))}: {m['body']}"
+
+
+MENTION_RE = re.compile(r"(?<![\w.])@([A-Za-z0-9_.-]+)")
+
+
+def _mentions(body: str, me: str) -> list[str]:
+    known = {a["name"] for a in list_agents() if "error" not in a}
+    seen: list[str] = []
+    for n in MENTION_RE.findall(body):
+        n = n.rstrip(".")
+        if n in known and n != me and n not in seen:
+            seen.append(n)
+    return seen
+
+
+def _all_targets(bus, a: Agent) -> list[tuple[str, str]]:
+    return [(m["project"], m["group"]) for m in bus.memberships(a.name)]
+
+
+def _label(a: Agent, project: str, group: str) -> str:
+    return (
+        f"dm:{_dm_peer(a.name, group)}"
+        if project == DM_PROJECT
+        else f"{project}/{group}"
+    )
 
 
 def _fmt_members(ms: list[dict]) -> str:
@@ -116,7 +143,12 @@ def cmd_init(bus, args):
             args.context,
             Path(args.dir) if args.dir else None,
             args.force,
-            spawn=Spawn(session=args.session or args.name, cmd=args.cmd, cwd=args.cwd),
+            spawn=Spawn(
+                session=args.session or args.name,
+                cmd=args.cmd,
+                cwd=args.cwd,
+                idle_timeout=args.idle_timeout,
+            ),
         )
     except ValueError as e:
         raise BusError(str(e)) from None
@@ -274,8 +306,12 @@ def _spawn_if_dead(args, peer: str) -> dict | None:
         r = spawner.start(a.name, a.dir, a.spawn)
     except (ValueError, RuntimeError, OSError) as e:
         r = {"agent": peer, "status": "error", "error": str(e)}
-    if r["status"] == "spawned" and not args.json:
-        print(f"(spawned {peer} in screen session '{r['session']}')", file=sys.stderr)
+    if r["status"] == "spawned":
+        args.bus.touch(peer, "spawned")
+        if not args.json:
+            print(
+                f"(spawned {peer} in screen session '{r['session']}')", file=sys.stderr
+            )
     elif r["status"] == "error" and not args.json:
         print(f"(could not spawn {peer}: {r['error']})", file=sys.stderr)
     return r
@@ -293,11 +329,43 @@ def cmd_ps(bus, args):
         sessions = spawner.list_sessions()
     except RuntimeError as e:
         raise BusError(str(e)) from None
+    rows = _ps_rows(bus, sessions)
+    _emit(
+        args,
+        rows,
+        "\n".join(
+            f"{'*' if r['alive'] else ' '} {_who(r['name'], r['role'])}"
+            f"  session={r['session']}"
+            + ("" if r["spawnable"] else "  (no spawn cmd)")
+            + (
+                f"  last: {_ago(r['idle_s'])} ({r['last_cmd']})"
+                if r["last_seen"]
+                else "  last: never"
+            )
+            + (f"  idle_timeout={r['idle_timeout']:g}m" if r["idle_timeout"] else "")
+            for r in rows
+        )
+        or "(no agents)",
+    )
+
+
+def _ago(seconds: float) -> str:
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m ago"
+    return f"{seconds / 3600:.1f}h ago"
+
+
+def _ps_rows(bus, sessions) -> list[dict]:
+    pres = bus.presence()
+    now = time.time()
     rows = []
     for a in list_agents():
         if "error" in a:
             continue
         ag = load_agent(a["dir"])
+        pr = pres.get(ag.name)
         rows.append(
             {
                 "name": ag.name,
@@ -305,17 +373,47 @@ def cmd_ps(bus, args):
                 "session": ag.spawn.session,
                 "alive": ag.spawn.session in sessions,
                 "spawnable": bool(ag.spawn.cmd),
+                "last_seen": pr["last_seen"] if pr else None,
+                "last_cmd": pr["last_cmd"] if pr else None,
+                "idle_s": (now - pr["last_seen"]) if pr else None,
+                "idle_timeout": ag.spawn.idle_timeout,
             }
         )
+    return rows
+
+
+def cmd_reap(bus, args):
+    """Kill alive sessions whose agent hasn't touched the bus for longer than its idle_timeout."""
+    try:
+        sessions = spawner.list_sessions()
+    except RuntimeError as e:
+        raise BusError(str(e)) from None
+    reaped = []
+    for r in _ps_rows(bus, sessions):
+        limit = args.idle if args.idle is not None else r["idle_timeout"]
+        if not r["alive"] or not limit:
+            continue
+        idle_s = r["idle_s"] if r["idle_s"] is not None else float("inf")
+        if idle_s < limit * 60:
+            continue
+        entry = {
+            "agent": r["name"],
+            "session": r["session"],
+            "idle_s": idle_s,
+            "killed": False,
+        }
+        if not args.dry_run:
+            entry["killed"] = spawner.kill(load_agent(r["name"]).spawn)
+        reaped.append(entry)
     _emit(
         args,
-        rows,
+        reaped,
         "\n".join(
-            f"{'*' if r['alive'] else ' '} {_who(r['name'], r['role'])}"
-            f"  session={r['session']}" + ("" if r["spawnable"] else "  (no spawn cmd)")
-            for r in rows
+            f"{'would kill' if args.dry_run else ('killed' if e['killed'] else 'kill failed')}:"
+            f" {e['agent']} (idle {_ago(e['idle_s']) if e['idle_s'] != float('inf') else 'never active'})"
+            for e in reaped
         )
-        or "(no agents)",
+        or "(nothing to reap)",
     )
 
 
@@ -409,7 +507,7 @@ def cmd_dm(bus, args):
     g = _dm_target(bus, a, args.peer)
     body = sys.stdin.read().strip() if args.stdin else args.body
     if body:
-        m = bus.send(DM_PROJECT, g, a.name, body, a.role)
+        m = bus.send(DM_PROJECT, g, a.name, body, a.role, reply_to=args.reply)
         a.set_cursor(DM_PROJECT, g, m["id"])
         m["spawn"] = _spawn_if_dead(args, args.peer)
         _emit(args, m, f"dm #{m['id']} → {args.peer}")
@@ -549,12 +647,22 @@ def cmd_send(bus, args):
     body = sys.stdin.read().strip() if args.stdin else tail[0]
     if not body:
         raise BusError("empty message")
-    m = bus.send(project, group, a.name, body, a.role)
+    m = bus.send(project, group, a.name, body, a.role, reply_to=args.reply)
     a.set_cursor(project, group, m["id"])  # own message counts as read
+    spawned = {}
+    for peer in _mentions(body, a.name):
+        r = _spawn_if_dead(args, peer)
+        if r:
+            spawned[peer] = r["status"]
+    m["spawned"] = spawned
     _emit(args, m, f"sent #{m['id']} to {project}/{group}")
 
 
 def cmd_read(bus, args):
+    if args.thread is not None:
+        msgs = bus.thread(args.thread)
+        _emit(args, msgs, _fmt_msgs(msgs, "(empty thread)"))
+        return
     project, group, _ = _group(args, args.pos, 0)
     after = args.after
     if args.unread:
@@ -567,6 +675,16 @@ def cmd_read(bus, args):
 
 def cmd_wait(bus, args):
     a = _agent(args)
+    if args.all:  # every group I'm in + every DM, in one blocking call
+        return _wait_loop(
+            bus,
+            a,
+            lambda: _all_targets(bus, a),
+            args.timeout,
+            args.interval,
+            args,
+            args.include_self,
+        )
     project, group, _ = _group(args, args.pos, 0)
     if (
         args.after is not None
@@ -574,6 +692,77 @@ def cmd_wait(bus, args):
         a.state.setdefault("cursors", {})[f"{project}/{group}"] = args.after
     return _wait_loop(
         bus, a, [(project, group)], args.timeout, args.interval, args, args.include_self
+    )
+
+
+# --- Claude Code Stop hook: push delivery ------------------------------------------
+def _collect_unread(bus, a: Agent, per_target: int = 20) -> list[dict]:
+    """Unread messages from others across all groups + DMs; advances cursors."""
+    hits = []
+    for project, group in _all_targets(bus, a):
+        new = bus.latest(
+            project, group, limit=per_target, after=a.cursor(project, group)
+        )
+        if new:
+            a.set_cursor(project, group, new[-1]["id"])
+        for m in new:
+            if m["sender"] != a.name:
+                m["where"] = _label(a, project, group)
+                hits.append(m)
+    hits.sort(key=lambda m: m["id"])
+    return hits
+
+
+def cmd_hook(bus, args):
+    """Stop hook for Claude Code: block the stop and hand over unread messages, if any."""
+    a = _agent(args)
+    if not sys.stdin.isatty():
+        try:
+            sys.stdin.read()  # consume the hook payload; we don't need it
+        except OSError:
+            pass
+    hits = _collect_unread(bus, a)
+    if not hits:
+        return 0  # nothing new → let Claude stop
+    lines = [f"[llm-bus] {len(hits)} new message(s) for {a.name}:"]
+    for m in hits:
+        lines.append(f"  [{m['where']}] {_fmt_msg(m)}")
+    lines.append(
+        f'Act on them, then reply: `llm-bus -c {args.agent_ref} -p PROJECT send --reply ID "..."`'
+        f' or `llm-bus -c {args.agent_ref} dm NAME "..."`.'
+        " Run `llm-bus guide` if unsure."
+    )
+    print(json.dumps({"decision": "block", "reason": "\n".join(lines)}))
+    return 0
+
+
+def cmd_install_hook(bus, args):
+    a = _agent(args)
+    path = Path(args.file)
+    settings = {}
+    if path.is_file():
+        try:
+            settings = json.loads(path.read_text() or "{}")
+        except json.JSONDecodeError as e:
+            raise BusError(f"{path}: invalid JSON: {e}") from None
+    cmd = f"llm-bus -c {args.agent_ref} hook"
+    stop = settings.setdefault("hooks", {}).setdefault("Stop", [])
+    already = any(
+        h.get("command") == cmd for entry in stop for h in entry.get("hooks", [])
+    )
+    if not already:
+        stop.append({"hooks": [{"type": "command", "command": cmd}]})
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(settings, indent=2) + "\n")
+    _emit(
+        args,
+        {"agent": a.name, "file": str(path), "command": cmd, "installed": not already},
+        (
+            f"installed Stop hook in {path}: {cmd}"
+            if not already
+            else f"already installed in {path}: {cmd}"
+        )
+        + "\nClaude Code will now be interrupted at end of turn whenever this agent has unread messages.",
     )
 
 
@@ -639,6 +828,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--session", help="screen session name (default: NAME)")
     s.add_argument("--cwd", help="working dir for --cmd (default: agent folder)")
+    s.add_argument(
+        "--idle-timeout", type=float, help="minutes idle before `llm-bus reap` kills it"
+    )
     s.set_defaults(fn=cmd_init)
     s = sub.add_parser("agents", help="list agents in the global agents folder")
     s.set_defaults(fn=cmd_agents)
@@ -651,6 +843,30 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("kill", help="quit an agent's screen session")
     s.add_argument("name")
     s.set_defaults(fn=cmd_kill)
+    s = sub.add_parser(
+        "reap", help="kill alive sessions idle longer than their idle_timeout"
+    )
+    s.add_argument(
+        "--idle", type=float, help="minutes; override every agent's idle_timeout"
+    )
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_reap)
+
+    s = sub.add_parser(
+        "hook",
+        help="Claude Code Stop hook: blocks the stop with unread messages (-c required)",
+    )
+    s.set_defaults(fn=cmd_hook)
+    s = sub.add_parser(
+        "install-hook",
+        help="add `llm-bus -c NAME hook` as a Stop hook to Claude Code settings",
+    )
+    s.add_argument(
+        "--file",
+        default=".claude/settings.local.json",
+        help="settings file to edit (default: ./.claude/settings.local.json)",
+    )
+    s.set_defaults(fn=cmd_install_hook)
 
     s = sub.add_parser(
         "whoami", help="dump this agent's full context (-c required, -p optional)"
@@ -698,6 +914,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--no-spawn", action="store_true", help="don't auto-start a dead PEER on send"
     )
+    s.add_argument("--reply", type=int, metavar="ID", help="reply to message ID")
     s.set_defaults(fn=cmd_dm)
 
     pr = sub.add_parser("project", help="manage projects").add_subparsers(
@@ -748,6 +965,14 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("send", help="send a message (-c -p required)")
     s.add_argument("pos", nargs="*", metavar="[GROUP] BODY")
     s.add_argument("--stdin", action="store_true", help="read body from stdin")
+    s.add_argument(
+        "--reply", type=int, metavar="ID", help="reply to message ID (thread)"
+    )
+    s.add_argument(
+        "--no-spawn",
+        action="store_true",
+        help="don't auto-start dead @mentioned agents",
+    )
     s.set_defaults(fn=cmd_send)
 
     s = sub.add_parser("read", help="read latest messages (-p required)")
@@ -761,6 +986,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument(
         "--mark", action="store_true", help="advance -c agent's cursor to last shown"
+    )
+    s.add_argument(
+        "--thread", type=int, metavar="ID", help="show the thread containing ID"
     )
     s.set_defaults(fn=cmd_read)
 
@@ -778,6 +1006,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--include-self", action="store_true", help="also return own messages"
     )
+    s.add_argument(
+        "--all",
+        action="store_true",
+        help="wait on every group I'm in + all DMs (no -p needed)",
+    )
     s.set_defaults(fn=cmd_wait)
 
     s = sub.add_parser("search", help="search messages in a group (-p required)")
@@ -793,7 +1026,15 @@ def main(argv: list[str] | None = None) -> int:
     if not argv:  # bare `llm-bus`: teach the caller how to use it
         print(guide_text(), end="")
         return 0
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    # Let flags precede the free positionals (`send --reply 3 "body"`): argparse otherwise
+    # refuses trailing positionals after an option for nargs="*" params.
+    if extra:
+        if hasattr(args, "pos") and not any(x.startswith("-") for x in extra):
+            args.pos = list(args.pos) + extra
+        else:
+            parser.error(f"unrecognized arguments: {' '.join(extra)}")
     try:
         args.agent = load_agent(args.agent_ref) if args.agent_ref else None
         args.project = load_project(args.project_ref) if args.project_ref else None
@@ -801,7 +1042,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     bus = Bus(Path(args.db) if args.db else None)
+    args.bus = bus
     try:
+        if args.agent is not None and args.cmd != "hook":
+            bus.touch(args.agent.name, args.cmd)
         return args.fn(bus, args) or 0
     except BusError as e:
         print(f"error: {e}", file=sys.stderr)

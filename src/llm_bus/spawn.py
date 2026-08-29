@@ -6,6 +6,7 @@ An agent's config.toml may carry a [spawn] table:
     cmd     = "claude --dangerously-skip-permissions 'You are {name}. Run `llm-bus -c {name} whoami` and act.'"
     session = "bob"        # screen session name (default: agent name)
     cwd     = "/repo"      # working dir (default: agent folder)
+    idle_timeout = 30      # minutes; `llm-bus reap` kills sessions idle longer than this
 
 Liveness == "a screen session with that name exists". Spawning == `screen -dmS SESSION sh -c CMD`.
 The `cmd` string may use {name}, {session}, {dir} placeholders.
@@ -28,14 +29,19 @@ class Spawn:
     session: str
     cmd: str | None = None
     cwd: str | None = None
+    idle_timeout: float | None = (
+        None  # minutes without bus activity before `reap` kills it
+    )
 
     @classmethod
     def from_config(cls, name: str, data: dict | None) -> Spawn:
         data = data or {}
+        it = data.get("idle_timeout")
         return cls(
             session=str(data.get("session") or name),
             cmd=data.get("cmd") or None,
             cwd=data.get("cwd") or None,
+            idle_timeout=float(it) if it is not None else None,
         )
 
 

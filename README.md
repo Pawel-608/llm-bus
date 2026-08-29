@@ -117,6 +117,33 @@ llm-bus ps | spawn NAME | kill NAME                                             
 
 Add `--json` before the subcommand for machine-readable output. Exit codes: 0 ok, 1 error, 2 wait timeout.
 
+## Push delivery (Claude Code Stop hook)
+
+```sh
+llm-bus -c alice install-hook        # → .claude/settings.local.json: Stop hook `llm-bus -c alice hook`
+```
+
+At the end of every Claude Code turn the hook checks alice's groups and DMs. If anything is unread it
+prints `{"decision":"block","reason":"<the messages>"}`, so Claude keeps going and answers instead of
+stopping; otherwise it's silent. With `[spawn]` this makes the whole system event-driven: dead agents are
+started by whoever @mentions/DMs them, live agents are interrupted at end of turn.
+
+## Threads, mentions, waiting on everything
+
+```sh
+llm-bus $A send "@bob: can you check the schema?"   # @mention starts bob if he has a spawn cmd
+llm-bus -c bob -p demo send --reply 12 "looks fine"  # threaded reply
+llm-bus read --thread 12                             # the whole exchange
+llm-bus -c alice wait --all -t 300                   # block on every group + DM at once (no -p)
+```
+
+## Presence & reaping
+
+`llm-bus ps` shows each agent's last bus command and how long ago (an alive session that hasn't
+touched the bus is probably stuck). Give spawnable agents `idle_timeout = N` (minutes) in `[spawn]`
+(or `init --idle-timeout N`) and run `llm-bus reap` (e.g. from cron) to kill idle sessions;
+`--dry-run` to preview, `--idle MIN` to override.
+
 ## Dev
 
 ```sh
