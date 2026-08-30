@@ -236,6 +236,22 @@ def test_routing_cycle(flow_file, env, capsys):  # noqa: F811
     assert d["stopped"] and sessions(env) == []
 
 
+def test_crash_loop_stops_flow(flow_file, env, capsys):  # noqa: F811
+    run(capsys, "flow", "run", str(flow_file), "go")
+    for node in ("impl", "review", "impl"):
+        clear_sessions(env)
+        _, d = run(capsys, "-c", f"loop.{node}", "flow", "done", "--rc", "1")
+    assert d["stopped"] and "3 consecutive" in d["reason"]
+    assert sessions(env) == ["loop.supervisor"]
+    _, st = run(capsys, "flow", "status", str(flow_file))
+    assert st["status"] == "stopped" and st["errors"] == 3
+    # a successful exit resets the counter
+    run(capsys, "flow", "resume", str(flow_file))
+    _, d = run(capsys, "-c", "loop.impl", "flow", "done")
+    _, st = run(capsys, "flow", "status", str(flow_file))
+    assert st["errors"] == 0 and d["routed"] == {"review": "spawned"}
+
+
 def test_blocked_and_rc_wake_supervisor(flow_file, env, capsys):  # noqa: F811
     run(capsys, "flow", "up", str(flow_file))
     run(capsys, "-c", "loop.impl", "flow", "signal", "blocked")

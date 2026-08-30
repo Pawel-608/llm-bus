@@ -62,6 +62,7 @@ FLOW_FILE = "flow.toml"
 WORKTREES_DIR = ".llm_bus_worktrees"
 SUPERVISOR = "supervisor"
 SIGNAL_KEY = "flow_signal"
+MAX_CONSECUTIVE_ERRORS = 3  # runner exits with rc!=0 in a row → stop (crash loop guard)
 
 DEFAULT_RUNNERS = {
     "claude": {
@@ -660,9 +661,13 @@ def flow_done(bus, agent, rc: int, args) -> dict:
         targets = []  # unknown signal → pause here; the supervisor will notice
     else:
         targets = list(n.next)
-    turn = bus.flow_next_turn(flow.name, f"{node} → {', '.join(targets) or '-'}")
+    st = bus.flow_next_turn(
+        flow.name, f"{node} → {', '.join(targets) or '-'}", error=bool(rc)
+    )
+    turn, errors = st["turns"], st["errors"]
     line = (
-        f"[flow:{flow.name}] turn {turn}/{flow.max_turns}: {node} → {', '.join(targets) or '(nobody)'}"
+        f"[flow:{flow.name}] turn {turn}/{flow.max_turns}: {node} → "
+        f"{', '.join(targets) or '(nobody)'}"
         + (f"  signal={signal}" if signal else "")
         + (f"  rc={rc}" if rc else "")
     )
@@ -673,11 +678,15 @@ def flow_done(bus, agent, rc: int, args) -> dict:
     ):
         line += f"  (unknown signal for {node}; routing paused)"
     _post(bus, flow, agent.name, line)
-    if turn > flow.max_turns:
-        bus.set_flow_state(flow.name, status="stopped")
-        _wake_supervisor(
-            bus, flow, args, f"max_turns ({flow.max_turns}) reached; flow stopped"
+    if turn > flow.max_turns or errors >= MAX_CONSECUTIVE_ERRORS:
+        why = (
+            f"max_turns ({flow.max_turns}) reached"
+            if turn > flow.max_turns
+            else f"{errors} consecutive runner failures (last: {node} rc={rc})"
         )
+        bus.set_flow_state(flow.name, status="stopped")
+        _post(bus, flow, "bus", f"[flow:{flow.name}] {why}; flow stopped")
+        _wake_supervisor(bus, flow, args, why)
         return {
             "flow": flow.name,
             "node": node,
@@ -685,6 +694,7 @@ def flow_done(bus, agent, rc: int, args) -> dict:
             "signal": signal,
             "turn": turn,
             "stopped": True,
+            "reason": why,
         }
     results = {t: _start(bus, flow, t, args)["status"] for t in targets}
     if (

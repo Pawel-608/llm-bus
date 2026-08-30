@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS flow_state (
     status TEXT NOT NULL DEFAULT 'idle',
     turns INTEGER NOT NULL DEFAULT 0,
     last_handoff TEXT,
+    errors INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 """
@@ -65,6 +66,11 @@ MIGRATIONS = [
         "messages",
         "reply_to",
         "ALTER TABLE messages ADD COLUMN reply_to INTEGER REFERENCES messages(id)",
+    ),
+    (
+        "flow_state",
+        "errors",
+        "ALTER TABLE flow_state ADD COLUMN errors INTEGER NOT NULL DEFAULT 0",
     ),
 ]
 
@@ -301,15 +307,17 @@ class Bus:
             )
         return self.flow_state(name)
 
-    def flow_next_turn(self, name: str, handoff: str) -> int:
-        """Atomically count a handoff; returns the new turn number."""
+    def flow_next_turn(self, name: str, handoff: str, error: bool = False) -> dict:
+        """Atomically count a handoff (and consecutive runner errors); returns the new state."""
         self.flow_state(name)
         row = self.conn.execute(
             "UPDATE flow_state SET turns=turns+1, last_handoff=?,"
-            " updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE name=? RETURNING turns",
-            (handoff, name),
+            " errors=CASE WHEN ? THEN errors+1 ELSE 0 END,"
+            " updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE name=?"
+            " RETURNING turns, errors",
+            (handoff, int(error), name),
         ).fetchone()
-        return int(row["turns"])
+        return dict(row)
 
     def _message(self, mid: int) -> dict:
         row = self.conn.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
