@@ -394,25 +394,41 @@ def _routes_text(flow: Flow, n: Node) -> str:
 
 
 def graph_text(flow: Flow) -> str:
+    """Compact routing table:
+
+    implementer  next → reviewer          (claude/opus; role)
+    reviewer     next → implementer       (codex/gpt-5; role)
+                 on approve → ideas
+    """
+    nodes = flow.nodes()
+    width = max((len(n) for n in nodes), default=0)
     out = [
-        f"flow {flow.name}  project={flow.project} group={flow.group}  entry={flow.entry or '-'}  max_turns={flow.max_turns}"
+        (
+            f"flow {flow.name}  project={flow.project} group={flow.group}  entry={flow.entry or '-'}"
+            f"  max_turns={flow.max_turns}"
+        )
     ]
     for n in flow.agents.values():
+        model = n.model or flow.runner(n).get("model") or "?"
         wt = (
-            " [worktree]"
+            "own worktree"
             if n.worktree is True
-            else (f" [worktree of {n.worktree}]" if n.worktree else "")
+            else (f"worktree of {n.worktree}" if n.worktree else "")
         )
-        out.append(
-            f"  {n.name}  ({n.runner}/{n.model or flow.runner(n).get('model', '?')}){wt}: {n.role or ''}"
-        )
-        out.append(f"      next → {', '.join(n.next) or '-'}")
-        for sig, ts in n.on.items():
-            out.append(f"      on {sig} → {', '.join(ts) or '-'}")
+        role = (n.role or "").split(". ")[0].split(";")[0]
+        role = role[:57] + "…" if len(role) > 58 else role
+        info = "; ".join(x for x in (f"{n.runner}/{model}", wt, role) if x)
+        rows = [("next", n.next)] + [(f"on {sig}", ts) for sig, ts in n.on.items()]
+        for i, (label, ts) in enumerate(rows):
+            name = n.name if i == 0 else ""
+            line = f"  {name:<{width}}  {label} → {', '.join(ts) or '–'}"
+            out.append(f"{line:<{width + 30}}  ({info})" if i == 0 else line)
     if flow.supervisor:
         s = flow.supervisor
+        model = s.model or flow.runner(s).get("model") or "?"
         out.append(
-            f"  supervisor  ({s.runner}/{s.model or flow.runner(s).get('model', '?')}) every {flow.every} handoffs"
+            f"  {SUPERVISOR:<{width}}  every {flow.every} handoffs, on blocked, on errors"
+            f"  ({s.runner}/{model})"
         )
     return "\n".join(out)
 

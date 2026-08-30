@@ -106,10 +106,31 @@ def test_example_roundtrips(env, capsys):  # noqa: F811
     fl = load_flow(str(f))
     assert fl.entry == "implementer"
     again = tomllib.loads(dump_flow(fl))
-    assert again["agents"]["resolver"]["on"] == {"ok": ["ideas"], "fix": ["implementer"]}
+    assert again["agents"]["resolver"]["on"] == {
+        "ok": ["ideas"],
+        "fix": ["implementer"],
+    }
     assert again["agents"]["reviewer"]["on"]["dispute"] == ["resolver"]
     assert again["supervisor"]["every"] == 5
     assert again["agents"]["reviewer"]["worktree"] == "implementer"
+
+
+def test_show_table(flow_file, capsys):
+    assert main(["flow", "show", str(flow_file)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        lines[1].startswith("  impl        next → review")
+        and "(fake/m1; own worktree; implement)" in lines[1]
+    )
+    assert (
+        lines[2].startswith("  review      next → impl, resolver")
+        and "worktree of impl" in lines[2]
+    )
+    assert lines[3:5] == [
+        "  resolver    next → –" + " " * 19 + "  (fake)",
+        "              on done → ideas",
+    ]
+    assert lines[-1].startswith("  supervisor  every 3 handoffs")
 
 
 def test_up_creates_agents_group_and_worktrees(flow_file, env, capsys):  # noqa: F811
