@@ -106,7 +106,8 @@ def test_example_roundtrips(env, capsys):  # noqa: F811
     fl = load_flow(str(f))
     assert fl.entry == "implementer"
     again = tomllib.loads(dump_flow(fl))
-    assert again["agents"]["resolver"]["on"]["done"] == ["ideas"]
+    assert again["agents"]["resolver"]["on"] == {"ok": ["ideas"], "fix": ["implementer"]}
+    assert again["agents"]["reviewer"]["on"]["dispute"] == ["resolver"]
     assert again["supervisor"]["every"] == 5
     assert again["agents"]["reviewer"]["worktree"] == "implementer"
 

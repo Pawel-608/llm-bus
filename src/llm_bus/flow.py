@@ -94,24 +94,28 @@ model = "kimi-k2"
 [agents.implementer]
 runner = "claude"
 model = "claude-opus-5"
-role = "iterate on the ML model on our data; report metrics"
+role = "implement the current idea on the ML model; then answer review comments: fix them, or argue why it is already good"
 worktree = true                 # own git worktree + branch llm-bus/ml_loop/implementer
 next = ["reviewer"]
 
 [agents.reviewer]
 runner = "codex"
 model = "gpt-5"
-role = "review the implementer's latest change; be concrete"
+role = "review the implementer's latest change and its replies to your comments; be concrete"
 worktree = "implementer"        # share implementer's worktree
-next = ["implementer", "resolver"]
+next = ["implementer"]          # comments → implementer fixes or pushes back
+[agents.reviewer.on]
+approve = ["ideas"]             # good enough → next idea
+dispute = ["resolver"]          # implementer disagrees and you still object → escalate
 
 [agents.resolver]
 runner = "claude"
 model = "claude-sonnet-5"
-role = "read the implementer/reviewer exchange; decide whether the result is good enough"
-next = []                       # by default nothing happens (the impl/review loop continues)
+role = "arbiter: read the implementer/reviewer dispute and rule on it; you never write code"
+next = []                       # must signal
 [agents.resolver.on]
-done = ["ideas"]                # `llm-bus -c ml_loop.resolver flow signal done`
+ok = ["ideas"]                  # `llm-bus -c ml_loop.resolver flow signal ok`
+fix = ["implementer"]           # the reviewer is right; implementer must fix
 
 [agents.ideas]
 runner = "kimi"

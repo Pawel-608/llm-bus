@@ -162,18 +162,20 @@ name = "ml_loop"; project = "ml"; repo = "~/projects/ml"; entry = "implementer";
 
 [agents.implementer]
 runner = "claude"; model = "claude-opus-5"; worktree = true
-role = "iterate on the ML model on our data; report metrics"
+role = "implement the idea; answer review comments: fix, or argue why it is already good"
 next = ["reviewer"]                      # default route when the process exits
 
 [agents.reviewer]
 runner = "codex"; model = "gpt-5"; worktree = "implementer"    # shares the worktree
-next = ["implementer", "resolver"]
+next = ["implementer"]                   # comments → implementer fixes or pushes back
+[agents.reviewer.on]
+approve = ["ideas"]                      # `llm-bus -c ml_loop.reviewer flow signal approve`
+dispute = ["resolver"]                   # implementer disagrees, reviewer still objects
 
 [agents.resolver]
-runner = "claude"; model = "claude-sonnet-5"
-next = []                                # exit silently → nothing (loop keeps going)
+runner = "claude"; model = "claude-sonnet-5"; next = []        # arbiter, only on disputes
 [agents.resolver.on]
-done = ["ideas"]                         # `llm-bus -c ml_loop.resolver flow signal done`
+ok = ["ideas"]; fix = ["implementer"]
 
 [agents.ideas]
 runner = "kimi"; next = ["implementer"]
