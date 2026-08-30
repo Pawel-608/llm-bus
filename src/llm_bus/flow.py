@@ -409,7 +409,7 @@ def graph_text(flow: Flow) -> str:
         )
     ]
     for n in flow.agents.values():
-        model = n.model or flow.runner(n).get("model") or "?"
+        model = n.model or flow.runner(n).get("model")
         wt = (
             "own worktree"
             if n.worktree is True
@@ -417,7 +417,9 @@ def graph_text(flow: Flow) -> str:
         )
         role = (n.role or "").split(". ")[0].split(";")[0]
         role = role[:57] + "…" if len(role) > 58 else role
-        info = "; ".join(x for x in (f"{n.runner}/{model}", wt, role) if x)
+        info = "; ".join(
+            x for x in (f"{n.runner}/{model}" if model else n.runner, wt, role) if x
+        )
         rows = [("next", n.next)] + [(f"on {sig}", ts) for sig, ts in n.on.items()]
         for i, (label, ts) in enumerate(rows):
             name = n.name if i == 0 else ""

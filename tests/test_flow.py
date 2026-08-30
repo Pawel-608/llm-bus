@@ -127,7 +127,7 @@ def test_show_table(flow_file, capsys):
         and "worktree of impl" in lines[2]
     )
     assert lines[3:5] == [
-        "  resolver    next → –" + " " * 19 + "  (fake)",
+        "  resolver    next → –" + " " * 18 + "  (fake)",
         "              on done → ideas",
     ]
     assert lines[-1].startswith("  supervisor  every 3 handoffs")
