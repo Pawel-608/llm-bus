@@ -209,9 +209,14 @@ llm-bus flow set flow.toml max_turns 400        # also: entry, every
 llm-bus flow run flow.toml "please retry with a smaller LR" --to implementer
 ```
 
-**Runners.** Built-in templates for `claude`, `codex`, `kimi`; override or add under `[runners.NAME]`
-with `cmd = "... {model} ... {prompt}"` (`{prompt}` is already shell-quoted) and an optional default
-`model`. **Worktrees:** `worktree = true` → `<repo>/.llm_bus_worktrees/<flow>-<node>` on branch
+**Runners.** Built-in `claude` runs a normal *interactive* Claude Code session (attach with
+`screen -r <flow>.<node>`; uses your claude.ai login — `ANTHROPIC_API_KEY` and nested-session vars are
+stripped). Its handoff is a Stop hook (`llm-bus -c NAME flow done --exit`, injected via `--settings`)
+that routes and closes the session at the end of the turn. `claude-p` is the non-interactive `-p`
+variant; `codex`/`kimi` are guesses at those CLIs. Override or add under `[runners.NAME]` with
+`cmd = "... {model} ... {prompt} [{settings}]"` (`{prompt}` is already shell-quoted) and an optional
+default `model`. If the runner process exits without the hook (crash, `/exit`), the
+`; flow done --rc $?` wrapper routes instead; 3 consecutive non-zero exits stop the flow. **Worktrees:** `worktree = true` → `<repo>/.llm_bus_worktrees/<flow>-<node>` on branch
 `llm-bus/<flow>/<node>`; `worktree = "other"` shares another node's; otherwise cwd is `repo`.
 Agent folders (`NOTES.md` included) survive `flow up`; only `config.toml`/`CONTEXT.md` are regenerated.
 

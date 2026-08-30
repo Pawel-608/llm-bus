@@ -236,6 +236,28 @@ def test_routing_cycle(flow_file, env, capsys):  # noqa: F811
     assert d["stopped"] and sessions(env) == []
 
 
+def test_stop_hook_exit_routes_once(flow_file, env, capsys):  # noqa: F811
+    run(capsys, "flow", "run", str(flow_file), "go")
+    hooks = json.loads((env / "home/agents/loop.impl/claude-settings.json").read_text())
+    assert (
+        hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
+        == "llm-bus -c loop.impl flow done --exit"
+    )
+    # Stop hook: route + close own session
+    _, d = run(capsys, "-c", "loop.impl", "flow", "done", "--exit")
+    assert d["routed"] == {"review": "spawned"} and sessions(env) == ["loop.review"]
+    assert (env / "home/agents/loop.impl/.flow_handed_off").exists()
+    # the wrapper's fallback `flow done` after the session dies must not route again
+    _, d = run(capsys, "-c", "loop.impl", "flow", "done", "--rc", "129")
+    assert d["skipped"] and sessions(env) == ["loop.review"]
+    _, st = run(capsys, "flow", "status", str(flow_file))
+    assert st["turns"] == 1
+    # next spawn clears the marker, so a plain exit routes normally again
+    clear_sessions(env)
+    run(capsys, "-c", "loop.review", "flow", "done")
+    assert not (env / "home/agents/loop.impl/.flow_handed_off").exists()
+
+
 def test_crash_loop_stops_flow(flow_file, env, capsys):  # noqa: F811
     run(capsys, "flow", "run", str(flow_file), "go")
     for node in ("impl", "review", "impl"):

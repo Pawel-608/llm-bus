@@ -64,13 +64,23 @@ SUPERVISOR = "supervisor"
 SIGNAL_KEY = "flow_signal"
 MAX_CONSECUTIVE_ERRORS = 3  # runner exits with rc!=0 in a row → stop (crash loop guard)
 
+# Nested-session env vars are stripped so a flow can be started from inside Claude Code and the
+# agents use the normal claude.ai login (ANTHROPIC_API_KEY would take precedence over it).
+_CLEAN_ENV = (
+    "env -u ANTHROPIC_API_KEY -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID"
+    " -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_PID"
+)
 DEFAULT_RUNNERS = {
+    # Interactive Claude Code session (attach with `screen -r <flow>.<node>`). {settings} is a
+    # per-agent settings file whose Stop hook runs `flow done --exit` at the end of the turn.
     "claude": {
-        # env -u: a flow may be started from inside a Claude Code session; the nested
-        # `claude` must not think it is that session.
-        "cmd": "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID"
-        " -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_PID"
-        " claude --dangerously-skip-permissions --model {model} -p {prompt}",
+        "cmd": f"{_CLEAN_ENV} claude --dangerously-skip-permissions --model {{model}}"
+        " --settings {settings} {prompt}",
+        "model": "claude-opus-5",
+    },
+    # Non-interactive: the process exits when done, the `; flow done` wrapper routes.
+    "claude-p": {
+        "cmd": f"{_CLEAN_ENV} claude --dangerously-skip-permissions --model {{model}} -p {{prompt}}",
         "model": "claude-opus-5",
     },
     "codex": {
@@ -82,6 +92,9 @@ DEFAULT_RUNNERS = {
         "model": "kimi-k2",
     },
 }
+SETTINGS_FILE = "claude-settings.json"
+HANDED_OFF = ".flow_handed_off"  # marker: the Stop hook already routed this run
+
 
 EXAMPLE = """\
 name = "ml_loop"
@@ -515,8 +528,11 @@ def _spawn_cmd(flow: Flow, n: Node, me: str) -> str:
         " CONTEXT it prints exactly: read unread, do your job, post a report, choose the route"
         " (signal or not), then exit."
     )
-    runner = tmpl.replace("{model}", shlex.quote(model or "")).replace(
-        "{prompt}", shlex.quote(prompt)
+    settings = agents_dir() / me / SETTINGS_FILE
+    runner = (
+        tmpl.replace("{model}", shlex.quote(model or ""))
+        .replace("{prompt}", shlex.quote(prompt))
+        .replace("{settings}", shlex.quote(str(settings)))
     )
     return f"{runner}; llm-bus -c {me} flow done --rc $?"
 
@@ -557,6 +573,10 @@ def flow_up(bus, flow: Flow) -> dict:
             f.write(
                 f"\n[flow]\nfile = {_toml_str(str(flow.path))}\nnode = {_toml_str(n.name)}\n"
             )
+        hook = {"type": "command", "command": f"llm-bus -c {me} flow done --exit"}
+        (a.dir / SETTINGS_FILE).write_text(
+            json.dumps({"hooks": {"Stop": [{"hooks": [hook]}]}}, indent=2) + "\n"
+        )
         bus.join_group(flow.project, flow.group, me, a.role)
         created.append({"agent": me, "node": n.name, "cwd": str(cwd) if cwd else None})
     # agents removed from the file: leave their folders, but make sure they're not running
@@ -599,6 +619,7 @@ def _start(bus, flow: Flow, node: str, args) -> dict:
     me = flow.agent_name(node)
     try:
         a = load_agent(me)
+        (a.dir / HANDED_OFF).unlink(missing_ok=True)
         r = spawner.start(a.name, a.dir, a.spawn)
     except Exception as e:  # noqa: BLE001 — routing must report, not crash
         r = {"agent": me, "status": "error", "error": f"{type(e).__name__}: {e}"}
@@ -628,8 +649,32 @@ def _wake_supervisor(bus, flow: Flow, args, reason: str) -> dict | None:
     return _start(bus, flow, SUPERVISOR, args)
 
 
-def flow_done(bus, agent, rc: int, args) -> dict:
+def flow_done(bus, agent, rc: int, args, exit_session: bool = False) -> dict:
     flow, node = agent_flow(agent)
+    marker = agent.dir / HANDED_OFF
+    if (
+        marker.exists()
+    ):  # the Stop hook already routed; this is the wrapper's fallback call
+        marker.unlink(missing_ok=True)
+        return {
+            "flow": flow.name,
+            "node": node,
+            "routed": [],
+            "skipped": "already handed off",
+        }
+    r = _route(bus, agent, flow, node, rc, args)
+    if exit_session:
+        marker.touch()
+        try:
+            spawner.kill(
+                agent.spawn
+            )  # closes our own screen session (SIGHUP to the runner)
+        except RuntimeError as e:
+            print(f"(could not close session: {e})", file=sys.stderr)
+    return r
+
+
+def _route(bus, agent, flow: Flow, node: str, rc: int, args) -> dict:
     signal = agent.state.get(SIGNAL_KEY) or None
     agent.state[SIGNAL_KEY] = (
         None  # state merge keeps disk keys, so overwrite rather than pop
@@ -969,7 +1014,12 @@ def cmd_signal(bus, args):
 
 def cmd_done(bus, args):
     a = _need_agent(args)
-    r = flow_done(bus, a, args.rc, args)
+    if args.exit and not sys.stdin.isatty():
+        try:
+            sys.stdin.read()  # Stop-hook payload; not needed
+        except OSError:
+            pass
+    r = flow_done(bus, a, args.rc, args, exit_session=args.exit)
     _emit(
         args,
         r,
@@ -1068,6 +1118,11 @@ def add_parsers(sub) -> None:
         "done", help="(runner wrapper) I exited: route to the next agents (-c required)"
     )
     s.add_argument("--rc", type=int, default=0, help="exit code of the runner")
+    s.add_argument(
+        "--exit",
+        action="store_true",
+        help="(Claude Code Stop hook) route, then close my own screen session",
+    )
     s.set_defaults(fn=cmd_done)
 
     s = with_file("add-agent", "add or update an agent (re-runs `up`)")
