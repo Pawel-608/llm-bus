@@ -537,6 +537,26 @@ def _spawn_cmd(flow: Flow, n: Node, me: str) -> str:
     return f"{runner}; llm-bus -c {me} flow done --rc $?"
 
 
+def trust_claude_dir(path: Path) -> bool:
+    """Pre-accept Claude Code's "trust this folder?" dialog for `path` (an interactive
+    session started in screen would otherwise sit on it forever). Same effect as answering Yes."""
+    cfg = Path.home() / ".claude.json"
+    try:
+        data = json.loads(cfg.read_text()) if cfg.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    proj = data.setdefault("projects", {}).setdefault(str(path.resolve()), {})
+    if proj.get("hasTrustDialogAccepted"):
+        return True
+    proj["hasTrustDialogAccepted"] = True
+    tmp = cfg.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, cfg)
+    return True
+
+
 def flow_up(bus, flow: Flow) -> dict:
     """Create/refresh project, group, agents, worktrees. Idempotent."""
     bus.ensure_group(flow.project, flow.group)
@@ -578,6 +598,8 @@ def flow_up(bus, flow: Flow) -> dict:
             json.dumps({"hooks": {"Stop": [{"hooks": [hook]}]}}, indent=2) + "\n"
         )
         bus.join_group(flow.project, flow.group, me, a.role)
+        if cwd and "claude" in str(flow.runner(n)["cmd"]):
+            trust_claude_dir(cwd)
         created.append({"agent": me, "node": n.name, "cwd": str(cwd) if cwd else None})
     # agents removed from the file: leave their folders, but make sure they're not running
     prefix = flow.name + "."
