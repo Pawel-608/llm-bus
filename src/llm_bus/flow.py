@@ -65,7 +65,11 @@ SIGNAL_KEY = "flow_signal"
 
 DEFAULT_RUNNERS = {
     "claude": {
-        "cmd": "claude --dangerously-skip-permissions --model {model} -p {prompt}",
+        # env -u: a flow may be started from inside a Claude Code session; the nested
+        # `claude` must not think it is that session.
+        "cmd": "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID"
+        " -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_PID"
+        " claude --dangerously-skip-permissions --model {model} -p {prompt}",
         "model": "claude-opus-5",
     },
     "codex": {
