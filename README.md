@@ -144,6 +144,75 @@ touched the bus is probably stuck). Give spawnable agents `idle_timeout = N` (mi
 (or `init --idle-timeout N`) and run `llm-bus reap` (e.g. from cron) to kill idle sessions;
 `--dry-run` to preview, `--idle MIN` to override.
 
+## Flows: multi-agent loops with bus-enforced routing
+
+Describe a loop once in a TOML file; the bus materializes it into ordinary agents and routes
+between them deterministically. Each agent can run on a different CLI/model (`claude`, `codex`,
+`kimi`, or your own template) and in its own git worktree.
+
+```sh
+llm-bus flow example > flow.toml     # full annotated example (the ML loop below)
+llm-bus flow up flow.toml            # project/group, agents `<flow>.<node>`, worktrees — idempotent
+llm-bus flow run flow.toml "improve AUC on dataset X"   # task → entry agent, loop self-propagates
+llm-bus flow status flow.toml | stop | resume | down [--worktrees]
+```
+
+```toml
+name = "ml_loop"; project = "ml"; repo = "~/projects/ml"; entry = "implementer"; max_turns = 200
+
+[agents.implementer]
+runner = "claude"; model = "claude-opus-5"; worktree = true
+role = "iterate on the ML model on our data; report metrics"
+next = ["reviewer"]                      # default route when the process exits
+
+[agents.reviewer]
+runner = "codex"; model = "gpt-5"; worktree = "implementer"    # shares the worktree
+next = ["implementer", "resolver"]
+
+[agents.resolver]
+runner = "claude"; model = "claude-sonnet-5"
+next = []                                # exit silently → nothing (loop keeps going)
+[agents.resolver.on]
+done = ["ideas"]                         # `llm-bus -c ml_loop.resolver flow signal done`
+
+[agents.ideas]
+runner = "kimi"; next = ["implementer"]
+[agents.ideas.on]
+dry = ["scout"]                          # out of ideas → web research → back to ideas
+
+[agents.scout]
+runner = "claude"; next = ["ideas"]
+
+[supervisor]
+runner = "claude"; model = "claude-sonnet-5"; every = 5
+```
+
+**How routing works.** Every node's spawn command is `<runner>; llm-bus -c <flow>.<node> flow done --rc $?`.
+When the LLM process exits, the bus (not the LLM) picks the next agents: `next` by default, or
+`on.<signal>` if the agent ran `llm-bus -c NAME flow signal <signal>` before exiting. Targets are
+started as screen sessions; a handoff line (`[flow:ml_loop] turn 12/200: reviewer → implementer, resolver`)
+is posted to the flow's group so the next agent knows why it was woken. Agents never start each
+other. Unknown signals pause; `max_turns` stops the flow.
+
+**Supervisor.** An optional agent outside the graph, woken every `every` handoffs, on
+`flow signal blocked`, on non-zero runner exit codes and at `max_turns`. It reads the traffic and
+may rewrite the graph — `flow up` is idempotent so edits apply immediately:
+
+```sh
+llm-bus flow show flow.toml
+llm-bus flow add-agent flow.toml tester --runner codex --role "run the test-suite" --next reviewer --on fail=implementer --worktree implementer
+llm-bus flow rm-agent flow.toml scout
+llm-bus flow route flow.toml implementer tester [--on SIGNAL]  |  unroute ...
+llm-bus flow set flow.toml max_turns 400        # also: entry, every
+llm-bus flow run flow.toml "please retry with a smaller LR" --to implementer
+```
+
+**Runners.** Built-in templates for `claude`, `codex`, `kimi`; override or add under `[runners.NAME]`
+with `cmd = "... {model} ... {prompt}"` (`{prompt}` is already shell-quoted) and an optional default
+`model`. **Worktrees:** `worktree = true` → `<repo>/.llm_bus_worktrees/<flow>-<node>` on branch
+`llm-bus/<flow>/<node>`; `worktree = "other"` shares another node's; otherwise cwd is `repo`.
+Agent folders (`NOTES.md` included) survive `flow up`; only `config.toml`/`CONTEXT.md` are regenerated.
+
 ## Dev
 
 ```sh

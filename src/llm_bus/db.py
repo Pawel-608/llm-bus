@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS presence (
     last_seen REAL NOT NULL,
     last_cmd TEXT
 );
+CREATE TABLE IF NOT EXISTS flow_state (
+    name TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'idle',
+    turns INTEGER NOT NULL DEFAULT 0,
+    last_handoff TEXT,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 """
 
 MIGRATIONS = [
@@ -273,6 +280,36 @@ class Bus:
     def presence(self) -> dict[str, dict]:
         rows = self.conn.execute("SELECT * FROM presence").fetchall()
         return {r["agent"]: dict(r) for r in rows}
+
+    # --- flows ----------------------------------------------------------
+    def flow_state(self, name: str) -> dict:
+        self.conn.execute("INSERT OR IGNORE INTO flow_state(name) VALUES (?)", (name,))
+        return dict(
+            self.conn.execute(
+                "SELECT * FROM flow_state WHERE name=?", (name,)
+            ).fetchone()
+        )
+
+    def set_flow_state(self, name: str, **fields) -> dict:
+        self.flow_state(name)
+        if fields:
+            sets = ", ".join(f"{k}=?" for k in fields)
+            self.conn.execute(
+                f"UPDATE flow_state SET {sets}, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+                " WHERE name=?",
+                (*fields.values(), name),
+            )
+        return self.flow_state(name)
+
+    def flow_next_turn(self, name: str, handoff: str) -> int:
+        """Atomically count a handoff; returns the new turn number."""
+        self.flow_state(name)
+        row = self.conn.execute(
+            "UPDATE flow_state SET turns=turns+1, last_handoff=?,"
+            " updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE name=? RETURNING turns",
+            (handoff, name),
+        ).fetchone()
+        return int(row["turns"])
 
     def _message(self, mid: int) -> dict:
         row = self.conn.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()

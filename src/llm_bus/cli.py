@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import flow as flowmod
 from . import spawn as spawner
 from .config import (
     DM_PROJECT,
@@ -1031,6 +1032,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="wait on every group I'm in + all DMs (no -p needed)",
     )
     s.set_defaults(fn=cmd_wait)
+
+    flowmod.add_parsers(sub)
 
     s = sub.add_parser("search", help="search messages in a group (-p required)")
     s.add_argument("pos", nargs="*", metavar="[GROUP] QUERY")

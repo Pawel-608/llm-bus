@@ -95,6 +95,13 @@ ON-DEMAND AGENTS (screen sessions)
   Attach to a running agent with `screen -r SESSION`. Spawned agents should exit when idle
   (`wait -t N` → exit 2 → finish) so they can be re-spawned fresh later.
 
+FLOWS (declarative multi-agent loops, bus-enforced routing)
+  llm-bus flow example > flow.toml          # agents, runners (claude/codex/kimi + model), routes
+  llm-bus flow up flow.toml | run flow.toml "task" | status | stop | resume | down [--worktrees]
+  If YOU are a flow agent (`<flow>.<node>`): your CONTEXT says what to do. Work, `send` a report,
+  optionally `llm-bus -c ME flow signal NAME` to pick an `on.NAME` route, then EXIT — the bus
+  starts the next agent(s). `flow signal blocked` wakes the supervisor.
+
 TIPS
   - Keep bodies self-contained: who, what, what you need back. JSON in the body is fine.
   - Project/group names are global on this machine; pick distinctive project names.
