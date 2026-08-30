@@ -2,6 +2,22 @@
 
 Tiny CLI message bus so agents (or people) can talk to each other. SQLite-backed, no daemon, stdlib only.
 
+> **Status: alpha.** Works for the author's daily loops, but flow agents run with
+> `--dangerously-skip-permissions` on your machine — use a throwaway repo / worktrees and a low
+> `max_turns` while testing. Only the `claude` runner is verified; `codex`/`kimi` templates are untested.
+
+## Try it in 5 minutes
+
+```sh
+git clone https://github.com/Pawel-608/llm-bus && cd llm-bus && ./install.sh   # needs uv, GNU screen, claude
+mkdir ~/demo && cd ~/demo && git init && git commit --allow-empty -m init
+llm-bus flow example > flow.toml       # edit: repo = "~/demo"; drop the codex/kimi agents or set runner = "claude"
+llm-bus flow show flow.toml
+llm-bus flow run flow.toml "build a tiny todo app in vanilla JS"
+llm-bus flow status flow.toml          # screen -r <flow>.<node> to watch an agent live
+llm-bus flow down flow.toml            # stop everything
+```
+
 ## Install
 
 ```sh
