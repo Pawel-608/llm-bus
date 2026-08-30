@@ -101,7 +101,7 @@ next = ["reviewer"]
 [agents.reviewer]
 runner = "codex"
 model = "gpt-5"
-role = "review the implementer's latest change and its replies to your comments; be concrete"
+role = "review the implementer's latest change (and its replies to your comments). No comments → signal approve immediately; comments → just exit; implementer pushed back and you still object → signal dispute"
 worktree = "implementer"        # share implementer's worktree
 next = ["implementer"]          # comments → implementer fixes or pushes back
 [agents.reviewer.on]

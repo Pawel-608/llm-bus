@@ -167,7 +167,7 @@ next = ["reviewer"]                      # default route when the process exits
 
 [agents.reviewer]
 runner = "codex"; model = "gpt-5"; worktree = "implementer"    # shares the worktree
-next = ["implementer"]                   # comments → implementer fixes or pushes back
+next = ["implementer"]                   # comments → implementer fixes or pushes back; none → approve
 [agents.reviewer.on]
 approve = ["ideas"]                      # `llm-bus -c ml_loop.reviewer flow signal approve`
 dispute = ["resolver"]                   # implementer disagrees, reviewer still objects
