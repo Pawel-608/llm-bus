@@ -311,6 +311,8 @@ def _spawn_if_dead(args, peer: str) -> dict | None:
         a = load_agent(peer)
         if not a.spawn.cmd:
             return None
+        if flowmod.is_flow_agent(a):  # only `flow done` may start flow agents
+            return {"agent": peer, "status": "flow-managed"}
         r = spawner.start(a.name, a.dir, a.spawn)
     except Exception as e:  # noqa: BLE001 — a failed spawn must never break the send itself
         r = {"agent": peer, "status": "error", "error": f"{type(e).__name__}: {e}"}

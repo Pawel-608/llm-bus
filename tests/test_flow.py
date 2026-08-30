@@ -248,6 +248,21 @@ def test_blocked_and_rc_wake_supervisor(flow_file, env, capsys):  # noqa: F811
     assert "rc=3" in msgs[0]["body"] and "exited with rc=3" in msgs[1]["body"]
 
 
+def test_mentions_and_dms_do_not_spawn_flow_agents(flow_file, env, capsys):  # noqa: F811
+    run(capsys, "flow", "up", str(flow_file))
+    run(capsys, "init", "alice")
+    run(capsys, "-c", "alice", "-p", "p", "join", "loop")
+    _, m = run(
+        capsys, "-c", "alice", "-p", "p", "send", "loop", "@loop.review look at this"
+    )
+    assert m["spawned"] == {"review": "flow-managed"} or m["spawned"] == {
+        "loop.review": "flow-managed"
+    }
+    _, d = run(capsys, "-c", "alice", "dm", "loop.impl", "hi")
+    assert d["spawn"]["status"] == "flow-managed"
+    assert sessions(env) == []
+
+
 def test_stop_resume_down(flow_file, env, capsys):  # noqa: F811
     run(capsys, "flow", "run", str(flow_file), "go")
     run(capsys, "flow", "stop", str(flow_file))

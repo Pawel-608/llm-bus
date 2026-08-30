@@ -453,7 +453,8 @@ Role: {n.role or "(unspecified)"}
 
 You are one step in an automated loop. You are started by the bus when it is your turn, do your
 work, report it, and EXIT. Routing is enforced by the bus after you exit — you never start
-other agents yourself.
+other agents yourself. Do NOT @mention or DM other flow agents (it does nothing here); address
+the next agent in plain words ("Reviewer: please check X").
 
 ## Every run
 1. `{A} whoami` — your context, notes, unread counts.
@@ -576,6 +577,13 @@ def flow_up(bus, flow: Flow) -> dict:
 
 
 # --- runtime --------------------------------------------------------------------
+def is_flow_agent(agent) -> bool:
+    try:
+        return bool(tomllib.loads(agent.config_path.read_text()).get("flow"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+
+
 def agent_flow(agent) -> tuple[Flow, str]:
     """(flow, node) for an agent created by `flow up`."""
     data = tomllib.loads(agent.config_path.read_text()).get("flow") or {}
