@@ -115,6 +115,33 @@ def test_example_roundtrips(env, capsys):  # noqa: F811
     assert again["agents"]["reviewer"]["worktree"] == "implementer"
 
 
+def test_trust_dirs(flow_file, env, capsys, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("HOME", str(env))  # ~/.claude.json lives in the sandbox
+    cfg = env / ".claude.json"
+    cfg.write_text('{"projects": {"/x": {"allowedTools": []}}}')
+    flow_file.write_text(
+        flow_file.read_text()
+        .replace('runner = "fake"', 'runner = "fakeclaude"')
+        .replace("[runners.fake]", "[runners.fakeclaude]")
+        .replace("echo {model}", "echo claude {model}")
+    )
+    rc, info = run(capsys, "flow", "up", str(flow_file))
+    assert rc == 0
+    wt = str(env / "repo" / ".llm_bus_worktrees" / "loop-impl")
+    assert set(info["trusted_dirs"]) == {wt, str(env / "repo")}
+    data = json.loads(cfg.read_text())
+    assert data["projects"][wt]["hasTrustDialogAccepted"] is True
+    assert data["projects"]["/x"] == {"allowedTools": []}  # untouched
+    # second up: nothing new to trust
+    rc, info = run(capsys, "flow", "up", str(flow_file))
+    assert info["trusted_dirs"] == []
+    # opt-out
+    flow_file.write_text("trust_dirs = false\n" + flow_file.read_text())  # top-level key
+    cfg.write_text("{}")
+    rc, info = run(capsys, "flow", "up", str(flow_file))
+    assert info["trusted_dirs"] == [] and cfg.read_text() == "{}"
+
+
 def test_show_table(flow_file, capsys):
     assert main(["flow", "show", str(flow_file)]) == 0
     lines = capsys.readouterr().out.splitlines()

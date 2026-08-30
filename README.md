@@ -235,6 +235,9 @@ default `model`. If the runner process exits without the hook (crash, `/exit`), 
 `; flow done --rc $?` wrapper routes instead; 3 consecutive non-zero exits stop the flow. **Worktrees:** `worktree = true` → `<repo>/.llm_bus_worktrees/<flow>-<node>` on branch
 `llm-bus/<flow>/<node>`; `worktree = "other"` shares another node's; otherwise cwd is `repo`.
 Agent folders (`NOTES.md` included) survive `flow up`; only `config.toml`/`CONTEXT.md` are regenerated.
+Interactive Claude Code sessions stop on the "trust this folder?" dialog, so `flow up` pre-accepts it for
+each agent cwd (the per-path `hasTrustDialogAccepted` entry in `~/.claude.json` — the same bit pressing
+Yes writes, nothing else) and says so; `trust_dirs = false` in the flow file disables that.
 
 ## Dev
 

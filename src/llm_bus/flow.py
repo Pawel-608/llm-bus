@@ -102,6 +102,7 @@ project = "ml"
 repo = "~/projects/ml"          # optional: enables per-agent git worktrees
 entry = "implementer"           # receives `llm-bus flow run` tasks
 max_turns = 200                 # safety stop; supervisor can raise it
+# trust_dirs = false            # don't pre-accept Claude Code's "trust this folder?" for agent cwds
 
 # Runner templates: {model} and {prompt} are substituted, {prompt} is already shell-quoted.
 # Built-ins exist for claude/codex/kimi; override or add your own here.
@@ -180,6 +181,9 @@ class Flow:
     agents: dict[str, Node] = field(default_factory=dict)
     supervisor: Node | None = None
     every: int = 5
+    trust_dirs: bool = (
+        True  # pre-accept Claude Code's per-folder trust dialog for agent cwds
+    )
 
     @property
     def group(self) -> str:
@@ -269,6 +273,7 @@ def load_flow(ref: str) -> Flow:
         agents=agents,
         supervisor=sup,
         every=int((sup_d or {}).get("every", 5)),
+        trust_dirs=bool(data.get("trust_dirs", True)),
     )
     _validate(flow)
     return flow
@@ -330,6 +335,8 @@ def dump_flow(flow: Flow) -> str:
     if flow.entry:
         lines.append(f"entry = {_toml_str(flow.entry)}")
     lines.append(f"max_turns = {flow.max_turns}")
+    if not flow.trust_dirs:
+        lines.append("trust_dirs = false")
     for rname, r in flow.runners.items():
         lines += ["", f"[runners.{rname}]"]
         lines += [f"{k} = {_toml_str(str(v))}" for k, v in r.items()]
@@ -549,7 +556,7 @@ def trust_claude_dir(path: Path) -> bool:
         return False
     proj = data.setdefault("projects", {}).setdefault(str(path.resolve()), {})
     if proj.get("hasTrustDialogAccepted"):
-        return True
+        return False  # nothing changed
     proj["hasTrustDialogAccepted"] = True
     tmp = cfg.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n")
@@ -566,6 +573,7 @@ def flow_up(bus, flow: Flow) -> dict:
         if nd.worktree is True
     }
     created = []
+    trusted: set[str] = set()
     for n in flow.nodes().values():
         me = flow.agent_name(n.name)
         cwd = node_cwd(flow, n, worktrees)
@@ -598,8 +606,9 @@ def flow_up(bus, flow: Flow) -> dict:
             json.dumps({"hooks": {"Stop": [{"hooks": [hook]}]}}, indent=2) + "\n"
         )
         bus.join_group(flow.project, flow.group, me, a.role)
-        if cwd and "claude" in str(flow.runner(n)["cmd"]):
-            trust_claude_dir(cwd)
+        wants_trust = cwd and flow.trust_dirs and "claude" in str(flow.runner(n)["cmd"])
+        if wants_trust and trust_claude_dir(cwd):
+            trusted.add(str(cwd))
         created.append({"agent": me, "node": n.name, "cwd": str(cwd) if cwd else None})
     # agents removed from the file: leave their folders, but make sure they're not running
     prefix = flow.name + "."
@@ -610,8 +619,17 @@ def flow_up(bus, flow: Flow) -> dict:
             except Exception as e:  # noqa: BLE001 — best effort
                 print(f"(could not stop {d.name}: {e})", file=sys.stderr)
     bus.flow_state(flow.name)
+    if trusted:
+        print(
+            "(trusted for Claude Code — `projects.<dir>.hasTrustDialogAccepted` in ~/.claude.json;"
+            " set trust_dirs = false in the flow file to skip: "
+            + ", ".join(sorted(trusted))
+            + ")",
+            file=sys.stderr,
+        )
     return {
         "flow": flow.name,
+        "trusted_dirs": sorted(trusted),
         "project": flow.project,
         "group": flow.group,
         "agents": created,
